@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from gateway import auth
 from gateway.db import PLANS, Principal
 
-from .audio import FORMATS, StreamEncoder
+from .audio import FORMATS, StreamEncoder, transcode_to_wav
 from .chunking import chunk_text
 from .config import settings
 from .models import GenParams, TTSEngine
@@ -356,16 +356,24 @@ async def add_voice(
             raise HTTPException(409, f"voice name {name!r} is taken")
         if p.max_voices and owner is None and len(auth.store.account_voices(p.account_id)) >= p.max_voices:
             raise HTTPException(429, f"voice limit: {p.max_voices} on the {p.plan} plan")
-    suffix = Path(file.filename or "clip.wav").suffix.lower() or ".wav"
-    if suffix not in {".wav", ".flac", ".mp3", ".ogg", ".m4a"}:
-        raise HTTPException(400, "upload wav, flac, mp3, ogg or m4a")
+    suffix = Path(file.filename or "clip.wav").suffix.lower() or ".bin"
     data = await file.read()
     if len(data) > 25 * 1024 * 1024:
         raise HTTPException(413, "clip too large (25 MB max)")
-    fd, tmp_name = tempfile.mkstemp(suffix=suffix, dir=registry.cache_dir)
+    fd, raw_name = tempfile.mkstemp(suffix=suffix, dir=registry.cache_dir)
     os.close(fd)  # Windows locks the file while the descriptor is open
-    tmp = Path(tmp_name)
-    tmp.write_bytes(data)
+    raw = Path(raw_name)
+    raw.write_bytes(data)
+    # normalise whatever the client sent (browser webm/opus, m4a, mp3, ...) to a
+    # clean 24 kHz mono wav so the cloner never has to decode it itself
+    tmp = raw.with_suffix(".wav") if suffix != ".wav" else raw
+    if tmp != raw:
+        try:
+            transcode_to_wav(raw, tmp)
+        except RuntimeError as e:
+            raise HTTPException(400, str(e))
+        finally:
+            raw.unlink(missing_ok=True)
     try:
         voice = await registry.add(
             name, tmp, description=description, language=language, exaggeration=exaggeration, overwrite=overwrite

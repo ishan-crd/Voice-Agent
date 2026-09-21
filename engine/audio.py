@@ -276,3 +276,15 @@ class StreamEncoder:
     def close(self) -> None:
         if self._ff is not None:
             self._ff.close()
+
+
+def transcode_to_wav(src: Path, dst: Path, sr: int = 24000) -> None:
+    """Decode any container/codec ffmpeg knows (webm/opus from browsers, m4a,
+    mp3, ogg ...) to 16-bit mono wav at `sr`.  Raises RuntimeError on failure."""
+    if FFMPEG is None:
+        raise RuntimeError("ffmpeg not found; upload a wav file instead")
+    cmd = [FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", str(src), "-ac", "1", "-ar", str(sr), "-sample_fmt", "s16", "-f", "wav", str(dst)]
+    proc = subprocess.run(cmd, capture_output=True, timeout=60)
+    if proc.returncode != 0 or not dst.exists() or dst.stat().st_size < 1000:
+        err = proc.stderr.decode(errors="ignore").strip().splitlines()
+        raise RuntimeError("could not decode the audio: " + (err[-1] if err else "unknown format"))
