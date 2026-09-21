@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Voice, api, fmtMs, speak } from "@/lib/api";
+import { Voice, api, fmtMs, preferredVoice, rememberVoice, speak } from "@/lib/api";
 import { PcmPlayer, pcmToWav } from "@/lib/audio";
 import { Field, Stat, Toast } from "@/components/ui";
 import { useSession } from "./layout";
@@ -41,7 +41,12 @@ export default function Playground() {
   const raf = useRef<number>(0);
 
   useEffect(() => {
-    api<{ voices: Voice[] }>("/v1/voices").then((r) => setVoices(r.voices)).catch(() => {});
+    api<{ voices: Voice[] }>("/v1/voices")
+      .then((r) => {
+        setVoices(r.voices);
+        setVoice(preferredVoice(r.voices));
+      })
+      .catch(() => {});
     return () => {
       cancelAnimationFrame(raf.current);
       player.current?.close();
@@ -187,7 +192,14 @@ export default function Playground() {
 
         <div className="card space-y-4 p-5">
           <Field label="Voice">
-            <select className="select" value={voice} onChange={(e) => setVoice(e.target.value)}>
+            <select
+              className="select"
+              value={voice}
+              onChange={(e) => {
+                setVoice(e.target.value);
+                rememberVoice(e.target.value);
+              }}
+            >
               {voices.map((x) => (
                 <option key={x.voice_id} value={x.voice_id}>
                   {x.voice_id}{x.builtin ? " (built-in)" : ""}

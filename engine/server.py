@@ -80,6 +80,8 @@ async def lifespan(app: FastAPI):
             log.exception("could not load Whisper; the Talk page will be disabled")
     ok, info = await llm.available()
     log.info("llm: %s (%s)", info, "ok" if ok else "unavailable - Talk page will report this")
+    if ok:
+        await llm.warm()
     log.info("ready on http://%s:%d  models=%s", settings.host, settings.port, list(engine.models))
     yield
 

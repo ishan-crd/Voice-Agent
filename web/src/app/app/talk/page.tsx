@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { API_BASE, Voice, api, fmtMs, getKey } from "@/lib/api";
+import { API_BASE, Voice, api, fmtMs, getKey, preferredVoice, rememberVoice } from "@/lib/api";
 import { PcmPlayer } from "@/lib/audio";
 import { Field, Stat } from "@/components/ui";
 
@@ -9,9 +9,9 @@ type Msg = { role: "user" | "assistant"; text: string; pending?: boolean };
 type Timings = { stt_ms: number | null; llm_first_token_ms: number | null; first_audio_ms: number | null; total_ms: number | null; client_first_audio_ms?: number | null };
 
 const PERSONAS: Record<string, string> = {
-  assistant: "You are a friendly, concise voice assistant on a phone call. Reply in one to three short sentences. Reply in the same language the user spoke (Hindi in Devanagari if they spoke Hindi). Never use markdown, lists, emojis or symbols - only plain spoken sentences.",
-  recruiter: "You are Priya, a recruiter calling a candidate about full-stack developer roles. Be warm and brisk. Confirm you are speaking to the right person, then explain we found matching roles and ask them to update their CV on our website. One to two short sentences per turn. Reply in the language the user speaks.",
-  support: "You are a calm customer support agent for an online store. Ask one clarifying question at a time, keep replies under two sentences, never use lists or markdown. Reply in the language the user speaks.",
+  assistant: "You are a friendly, concise voice assistant on a phone call. Reply in one to three short sentences. Never use markdown, lists, emojis or symbols - only plain spoken sentences.",
+  recruiter: "You are Priya, a recruiter calling a candidate about full-stack developer roles. Be warm and brisk. Confirm you are speaking to the right person, then explain we found matching roles and ask them to update their CV on our website. One to two short sentences per turn.",
+  support: "You are a calm customer support agent for an online store. Ask one clarifying question at a time, keep replies under two sentences, never use lists or markdown.",
 };
 
 export default function Talk() {
@@ -36,7 +36,12 @@ export default function Talk() {
   const bottom = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    api<{ voices: Voice[] }>("/v1/voices").then((r) => setVoices(r.voices)).catch(() => {});
+    api<{ voices: Voice[] }>("/v1/voices")
+      .then((r) => {
+        setVoices(r.voices);
+        setVoice(preferredVoice(r.voices));
+      })
+      .catch(() => {});
     connect();
     return () => {
       ws.current?.close();
@@ -172,7 +177,7 @@ export default function Talk() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Talk</h1>
-          <p className="text-sm text-fg-2">Hold the button, speak, let go. Everything below runs on this machine: Whisper → LLM → your cloned voice.</p>
+          <p className="text-sm text-fg-2">Hold the button, speak, let go. Everything runs on this machine: Whisper → LLM → <span className="mono">{voice}</span>.</p>
         </div>
         <div className="flex flex-wrap gap-2 text-xs">
           <span className={`pill ${conn === "ready" ? "text-good" : "text-warn"}`}>{conn === "ready" ? "● connected" : conn}</span>
@@ -256,7 +261,14 @@ export default function Talk() {
 
         <div className="card space-y-4 p-5">
           <Field label="Voice">
-            <select className="select" value={voice} onChange={(e) => setVoice(e.target.value)}>
+            <select
+              className="select"
+              value={voice}
+              onChange={(e) => {
+                setVoice(e.target.value);
+                rememberVoice(e.target.value);
+              }}
+            >
               {voices.map((x) => (
                 <option key={x.voice_id} value={x.voice_id}>{x.voice_id}{x.builtin ? " (built-in)" : ""}</option>
               ))}
@@ -286,6 +298,7 @@ export default function Talk() {
           <Field label="System prompt">
             <textarea className="textarea min-h-[140px] text-xs" value={system} onChange={(e) => setSystem(e.target.value)} />
           </Field>
+          <p className="-mt-2 text-[11px] text-fg-3">The reply language is added automatically from what you speak (or the Language setting) - no need to mention it here.</p>
           <button className="btn btn-ghost w-full justify-center" onClick={() => send({ type: "reset" })}>
             Clear conversation
           </button>

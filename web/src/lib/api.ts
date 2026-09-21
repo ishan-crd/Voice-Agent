@@ -180,3 +180,20 @@ export function fmtDur(s: number | null | undefined) {
 export function fmtDate(ts: number | null | undefined) {
   return ts ? new Date(ts * 1000).toLocaleString() : "–";
 }
+
+const VOICE_KEY = "va_voice";
+/** The voice a page should start on: the last one picked, else the newest cloned voice, else the built-in. */
+export function preferredVoice(voices: Voice[]): string {
+  let saved = "";
+  try {
+    saved = localStorage.getItem(VOICE_KEY) || "";
+  } catch {}
+  if (saved && voices.some((v) => v.voice_id === saved)) return saved;
+  const cloned = voices.filter((v) => !v.builtin).sort((a, b) => b.created_at - a.created_at);
+  return cloned[0]?.voice_id || voices[0]?.voice_id || "default";
+}
+export function rememberVoice(id: string) {
+  try {
+    localStorage.setItem(VOICE_KEY, id);
+  } catch {}
+}

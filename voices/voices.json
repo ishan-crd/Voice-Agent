@@ -1,12 +1,8 @@
 {
-  "ishantry": {
+  "ishan_english": {
     "description": "",
     "language": "en",
-    "exaggeration": 0.5
-  },
-  "ishan_hindi": {
-    "description": "trying hindi",
-    "language": "hi",
-    "exaggeration": 0.5
+    "exaggeration": 0.5,
+    "mode": "quick"
   }
 }

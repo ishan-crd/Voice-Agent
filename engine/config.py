@@ -49,10 +49,11 @@ class Settings(BaseSettings):
     stt_model: str = "openai/whisper-large-v3-turbo"
     llm_base_url: str = "http://127.0.0.1:11434/v1"  # any OpenAI-compatible chat endpoint (Ollama by default)
     llm_api_key: str = "ollama"
-    llm_model: str = "qwen2.5:3b-instruct"
+    llm_model: str = "qwen2.5:7b-instruct"
+    # keep this free of other languages' names: mentioning "Hindi"/"Devanagari" here
+    # primes small models to answer in Hindi regardless of what the user spoke
     llm_system_prompt: str = (
         "You are a friendly, concise voice assistant on a phone call. Reply in one to three short sentences. "
-        "Reply in the same language the user spoke (Hindi in Devanagari if they spoke Hindi). "
         "Never use markdown, lists, emojis or symbols - only plain spoken sentences."
     )
 

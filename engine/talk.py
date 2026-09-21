@@ -44,6 +44,52 @@ log = logging.getLogger("tts.talk")
 
 _TERM = re.compile(r"[.!?।॥。！？]\s*$")
 
+# script -> language the TTS should use for a sentence; Latin falls back to the
+# conversation language so English-only Turbo never receives text it can't speak
+_SCRIPTS = [
+    (re.compile(r"[\u0900-\u097F]"), "hi"),
+    (re.compile(r"[\u0600-\u06FF]"), "ar"),
+    (re.compile(r"[\u0400-\u04FF]"), "ru"),
+    (re.compile(r"[\u3040-\u30FF]"), "ja"),
+    (re.compile(r"[\uAC00-\uD7AF]"), "ko"),
+    (re.compile(r"[\u4E00-\u9FFF]"), "zh"),
+    (re.compile(r"[\u0370-\u03FF]"), "el"),
+    (re.compile(r"[\u0590-\u05FF]"), "he"),
+]
+# every non-Latin letter range we know about; a reply that uses one the
+# conversation language does not use is a drift and must not reach the TTS
+_ALL_SCRIPTS = {
+    "hi": r"\u0900-\u097F", "ar": r"\u0600-\u06FF", "ru": r"\u0400-\u04FF", "ja": r"\u3040-\u30FF",
+    "ko": r"\uAC00-\uD7AF", "zh": r"\u4E00-\u9FFF", "el": r"\u0370-\u03FF", "he": r"\u0590-\u05FF",
+    "_bn": r"\u0980-\u09FF", "_pa": r"\u0A00-\u0A7F", "_gu": r"\u0A80-\u0AFF", "_ta": r"\u0B80-\u0BFF",
+    "_te": r"\u0C00-\u0C7F", "_kn": r"\u0C80-\u0CFF", "_ml": r"\u0D00-\u0D7F", "_th": r"\u0E00-\u0E7F",
+}
+
+
+def foreign_letters(text: str, lang: str) -> bool:
+    """True if `text` contains letters from a script the reply language does not use."""
+    allowed = {lang, "zh"} if lang == "ja" else {lang}
+    ranges = "".join(r for k, r in _ALL_SCRIPTS.items() if k not in allowed)
+    return re.search(f"[{ranges}]", text) is not None
+
+
+_LANG_NAMES = {"en": "English", "hi": "Hindi", "es": "Spanish", "fr": "French", "de": "German", "ar": "Arabic", "pt": "Portuguese", "it": "Italian", "ja": "Japanese", "ko": "Korean", "zh": "Chinese", "ru": "Russian", "tr": "Turkish", "nl": "Dutch", "pl": "Polish"}
+_SPEAKABLE = set(_LANG_NAMES) | {"sv", "da", "fi", "no", "el", "he", "ms", "sw"}
+
+
+def script_lang(text: str, default: str) -> str:
+    for rx, lang in _SCRIPTS:
+        if rx.search(text):
+            return lang
+    return default
+
+
+def _strip_unspeakable(text: str) -> str:
+    """Markdown, emoji and symbols the models would try to read out."""
+    text = re.sub(r"[*_`#>\[\]()]+", " ", text)
+    text = re.sub(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
 
 class LLM:
     """Streaming chat over any OpenAI-compatible endpoint (Ollama by default)."""
@@ -53,6 +99,14 @@ class LLM:
         self.model = settings.llm_model
         self.key = settings.llm_api_key
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(60, connect=5))
+
+    async def warm(self) -> None:
+        """Load the model into Ollama's VRAM so the first real turn is not a 2-3 s cold start."""
+        try:
+            async for _ in self.stream([{"role": "user", "content": "Say OK."}]):
+                pass
+        except Exception:  # noqa: BLE001
+            pass
 
     async def available(self) -> tuple[bool, str]:
         try:
@@ -67,7 +121,7 @@ class LLM:
             return False, f"cannot reach {self.base}: {e.__class__.__name__}"
 
     async def stream(self, messages: list[dict]) -> AsyncIterator[str]:
-        body = {"model": self.model, "messages": messages, "stream": True, "temperature": 0.6, "max_tokens": 200}
+        body = {"model": self.model, "messages": messages, "stream": True, "temperature": 0.6, "max_tokens": 200, "keep_alive": "24h"}
         async with self.client.stream("POST", f"{self.base}/chat/completions", json=body, headers={"Authorization": f"Bearer {self.key}"}) as r:
             if r.status_code >= 400:
                 raise RuntimeError(f"LLM {r.status_code}: {(await r.aread())[:200].decode(errors='ignore')}")
@@ -190,33 +244,62 @@ class Conversation:
                 timings["stt_ms"] = 0
                 await self.send(type="transcript", text=user_text, language=lang, ms=0)
 
-            # 2. think + 3. speak, overlapped: sentences go to TTS as soon as they complete
-            messages = [{"role": "system", "content": self.system}, *self.history[-12:], {"role": "user", "content": user_text}]
+            if lang not in _SPEAKABLE:
+                lang = "en"
+            lang_name = _LANG_NAMES.get(lang, lang)
+            log.info("talk heard [%s] %r", lang, user_text)
+
+            # 2. think + 3. speak, overlapped: sentences go to TTS as soon as they complete.
+            # The reply language is pinned explicitly; small models drift otherwise.
+            # NOTE: do not append instructions to the user turn - a trailing "(answer in
+            # English, in its native script)" made Qwen answer in random scripts 6/6.
+            system = self.system + f"\nThe user speaks {lang_name}. Always answer in {lang_name}."
+            messages = [{"role": "system", "content": system}, *self.history[-12:], {"role": "user", "content": user_text}]
             sentences: asyncio.Queue[str | None] = asyncio.Queue()
             speaker = asyncio.create_task(self._speak(sentences, lang, t0, timings, cancel))
 
             reply = ""
             buf = ""
-            first = True
-            async for tok in self.llm.stream(messages):
-                if cancel.is_set():
-                    break
-                if first:
-                    first = False
-                    timings["llm_first_token_ms"] = round((time.perf_counter() - t0) * 1000)
-                reply += tok
-                buf += tok
-                await self.send(type="token", text=tok)
-                if _TERM.search(buf) and len(buf.strip()) > 2:
-                    parts = split_sentences(buf)
-                    for s in parts:
-                        await sentences.put(s)
-                    buf = ""
+            for attempt in range(2):
+                reply = ""
+                buf = ""
+                first = True
+                drifted = False
+                async for tok in self.llm.stream(messages):
+                    if cancel.is_set():
+                        break
+                    if first:
+                        first = False
+                        timings["llm_first_token_ms"] = timings["llm_first_token_ms"] or round((time.perf_counter() - t0) * 1000)
+                    reply += tok
+                    buf += tok
+                    # wrong script anywhere in the reply -> restart with a firmer instruction
+                    if attempt == 0 and foreign_letters(reply, lang):
+                        drifted = True
+                        break
+                    await self.send(type="token", text=tok)
+                    if _TERM.search(buf) and len(buf.strip()) > 2:
+                        for sent in split_sentences(buf):
+                            await sentences.put(sent)
+                        buf = ""
+                if drifted:
+                    log.warning("talk: LLM answered in the wrong script (%r); retrying with a forced language", reply[:40])
+                    messages[-1] = {"role": "user", "content": f"{user_text}\n\nIMPORTANT: reply ONLY in {lang_name}. Do not use any other language or script."}
+                    continue
+                break
+            if foreign_letters(reply, lang):
+                # still wrong after the retry: say so instead of babbling through it
+                log.warning("talk: LLM drifted twice (%r); speaking a fallback", reply[:40])
+                reply = {"hi": "माफ़ कीजिए, मैं समझ नहीं पाया। क्या आप दोबारा कह सकते हैं?"}.get(lang, "Sorry, I lost my train of thought. Could you say that again?")
+                buf = ""
+                await self.send(type="token", text=reply)
+                await sentences.put(reply)
             if buf.strip() and not cancel.is_set():
                 await sentences.put(buf.strip())
             await sentences.put(None)
             await speaker
             timings["total_ms"] = round((time.perf_counter() - t0) * 1000)
+            log.info("talk reply [%s] %r (first audio %s ms)", lang, reply.strip()[:120], timings["first_audio_ms"])
             if not cancel.is_set():
                 self.history += [{"role": "user", "content": user_text}, {"role": "assistant", "content": reply.strip()}]
                 await self.send(type="done", reply=reply.strip(), timings=timings)
@@ -236,20 +319,26 @@ class Conversation:
             voice = self.registry.resolve(self.voice)
         except KeyError:
             voice = self.registry.resolve(None)
-        kind = self.engine.pick(lang)
-        self._kind = kind
         self._audio_s = 0.0
-        conds = await self.registry.ensure(voice, kind)
-        gain = settings.gain_turbo if kind == "turbo" else settings.gain_multilingual
+        self._kind = self.engine.pick(lang)
         params = GenParams()
         while True:
             s = await sentences.get()
             if s is None or cancel.is_set():
                 return
+            s = _strip_unspeakable(s)
+            if not re.search(r"\w", s) or foreign_letters(s, lang):
+                continue  # nothing speakable, or a script the models cannot speak
+            # each sentence is routed by its own script, so a stray Hindi or
+            # Chinese sentence goes to the multilingual model instead of Turbo
+            s_lang = script_lang(s, lang)
+            kind = self.engine.pick(s_lang)
+            conds = await self.registry.ensure(voice, kind)
+            gain = settings.gain_turbo if kind == "turbo" else settings.gain_multilingual
             await self.send(type="sentence", text=s)
             for chunk in chunk_text(s):
                 q = self.engine.worker.submit_stream(
-                    lambda c=chunk: self.engine.stream(kind, c, conds, lang, params), priority=0, cancel=cancel
+                    lambda c=chunk, k=kind, cd=conds, l=s_lang: self.engine.stream(k, c, cd, l, params), priority=0, cancel=cancel
                 )
                 while True:
                     item = await q.get()
