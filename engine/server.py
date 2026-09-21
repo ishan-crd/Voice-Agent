@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import AsyncIterator, Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from gateway import auth
@@ -70,6 +72,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Voice-Agent TTS", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()] or ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Sample-Rate"],
+)
 
 
 # --------------------------------------------------------------------- schema
@@ -547,6 +556,15 @@ async def get_stats():
 async def unhandled(request: Request, exc: Exception):
     log.exception("unhandled error on %s", request.url.path)
     return JSONResponse({"error": {"message": str(exc), "type": "server_error"}}, status_code=500)
+
+
+# ------------------------------------------------------------ dashboard
+# `cd web && npm run build` writes the static export to web/out; when it
+# exists the console is served from this same process at / and /app.
+_WEB = Path(__file__).resolve().parents[1] / "web" / "out"
+if _WEB.exists():
+    app.mount("/", StaticFiles(directory=str(_WEB), html=True), name="web")
+    log.info("serving dashboard from %s", _WEB)
 
 
 def main() -> None:

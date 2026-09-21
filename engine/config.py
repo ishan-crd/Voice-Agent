@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     db_path: Path = Path("data/voiceagent.db")
     admin_key: str = ""  # unlocks /admin/* and bypasses quotas
     public_url: str = ""  # shown in the dashboard / docs, e.g. https://tts.example.com
+    cors_origins: str = "*"  # comma-separated; "*" for the beta, tighten in production
 
     # streaming
     first_chunk_words: int = 10

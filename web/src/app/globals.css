@@ -1,0 +1,230 @@
+@import "tailwindcss";
+
+/* Dark-first product surface. Light values exist so the OS preference is
+   respected; the brand accent stays the same in both. */
+:root {
+  --bg: #0a0b10;
+  --bg-elev: #11131a;
+  --bg-card: #151823;
+  --border: #23273a;
+  --text: #f2f3f7;
+  --text-2: #a4a9bd;
+  --text-3: #6b7088;
+  --accent: #7c5cff;
+  --accent-2: #38d6c4;
+  --accent-glow: rgba(124, 92, 255, 0.35);
+  --good: #2fd47a;
+  --warn: #f5b52b;
+  --bad: #ff5d6c;
+  --series-1: #3987e5;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f7f7fb;
+  --bg-elev: #ffffff;
+  --bg-card: #ffffff;
+  --border: #e4e6f0;
+  --text: #0c0d14;
+  --text-2: #4b5068;
+  --text-3: #7d8299;
+  --accent: #6a49ff;
+  --accent-2: #0fa896;
+  --accent-glow: rgba(106, 73, 255, 0.25);
+  --series-1: #2a78d6;
+  color-scheme: light;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-elev: var(--bg-elev);
+  --color-card: var(--bg-card);
+  --color-border: var(--border);
+  --color-fg: var(--text);
+  --color-fg-2: var(--text-2);
+  --color-fg-3: var(--text-3);
+  --color-accent: var(--accent);
+  --color-accent-2: var(--accent-2);
+  --color-good: var(--good);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+}
+
+* {
+  border-color: var(--border);
+}
+
+.glow {
+  box-shadow: 0 0 0 1px var(--border), 0 20px 60px -20px var(--accent-glow);
+}
+
+.gradient-text {
+  background: linear-gradient(92deg, #c4b5ff 0%, var(--accent) 40%, var(--accent-2) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.grid-bg {
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(ellipse at top, black 30%, transparent 75%);
+}
+
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border-radius: 10px;
+  padding: 0.55rem 0.95rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  transition: transform 0.08s ease, background 0.15s ease, opacity 0.15s ease;
+  cursor: pointer;
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+.btn-primary:hover {
+  filter: brightness(1.1);
+}
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.btn-ghost:hover {
+  background: var(--bg-elev);
+}
+.btn-danger {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--bad);
+}
+
+.input,
+.select,
+.textarea {
+  width: 100%;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.9rem;
+  color: var(--text);
+  outline: none;
+}
+.input:focus,
+.select:focus,
+.textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--border);
+  color: var(--text-2);
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--good);
+  animation: pulse-dot 1.6s ease-in-out infinite;
+}
+
+@keyframes bar {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.eq span {
+  display: inline-block;
+  width: 3px;
+  height: 14px;
+  margin-right: 2px;
+  border-radius: 2px;
+  background: var(--accent-2);
+  transform-origin: bottom;
+  animation: bar 0.9s ease-in-out infinite;
+}
+.eq span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.eq span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+.eq span:nth-child(4) {
+  animation-delay: 0.45s;
+}
+
+pre.code {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  font-size: 0.8rem;
+  line-height: 1.55;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
