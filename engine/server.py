@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator, Literal
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -34,6 +34,7 @@ from .audio import FORMATS, StreamEncoder, transcode_to_wav
 from .chunking import chunk_text
 from .config import settings
 from .models import GenParams, TTSEngine
+from .talk import LLM, Conversation
 from .voices import VoiceRegistry
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,6 +42,8 @@ log = logging.getLogger("tts.server")
 
 engine = TTSEngine()
 registry = VoiceRegistry(engine)
+stt = None  # Whisper, loaded in lifespan when TTS_STT=1
+llm = LLM()
 
 _DEVANAGARI = re.compile(r"[ऀ-ॿ]")
 _MODEL_ALIASES = {
@@ -65,8 +68,18 @@ _ttfa_window: deque[float] = deque(maxlen=200)
 # ------------------------------------------------------------------ lifecycle
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global stt
     engine.load()
     registry.load()
+    if settings.stt:
+        try:
+            from .stt import Whisper
+
+            stt = Whisper(settings.stt_model, settings.device)
+        except Exception:  # noqa: BLE001
+            log.exception("could not load Whisper; the Talk page will be disabled")
+    ok, info = await llm.available()
+    log.info("llm: %s (%s)", info, "ok" if ok else "unavailable - Talk page will report this")
     log.info("ready on http://%s:%d  models=%s", settings.host, settings.port, list(engine.models))
     yield
 
@@ -524,6 +537,31 @@ async def admin_usage(days: int = 30, account_id: str | None = None):
     return st.usage_summary(account_id, days=max(1, min(days, 365)))
 
 
+# ------------------------------------------------------------------- talk
+@app.websocket("/v1/talk")
+async def talk(ws: WebSocket):
+    # browsers cannot set headers on a WebSocket: the key comes as ?api_key=
+    try:
+        p = await auth.principal(ws)  # type: ignore[arg-type]  (reads headers/query the same way)
+    except HTTPException as e:
+        await ws.close(code=4401, reason=str(e.detail)[:120])
+        return
+    await ws.accept()
+    conv = Conversation(ws, engine, registry, stt, llm)
+
+    def meter(chars: int, audio_s: float, ttfa_ms: float | None, total_ms: float | None, lang: str, kind: str) -> None:
+        auth.record(p, endpoint="talk", model=kind, voice=conv.voice, language=lang, format="pcm", chars=chars, audio_s=audio_s, ttfa_ms=ttfa_ms, total_ms=total_ms, status=200)
+
+    conv.meter = meter
+    await conv.run()
+
+
+@app.get("/v1/talk/status")
+async def talk_status(p: Principal = Depends(auth.principal)):
+    ok, info = await llm.available()
+    return {"stt": getattr(stt, "model_id", None), "llm": info, "llm_ok": ok}
+
+
 # ------------------------------------------------------------------- misc
 @app.get("/v1/models")
 async def list_models():
@@ -551,6 +589,7 @@ async def health():
         "models": list(engine.models),
         "voices": sorted(registry.voices),
         "queue_depth": engine.worker.queue_depth,
+        "stt": getattr(stt, "model_id", None),
         "formats": sorted(FORMATS),
         "gpu": gpu,
     }

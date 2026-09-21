@@ -44,6 +44,18 @@ class Settings(BaseSettings):
     t3_fp16: bool = True
     cuda_graph: bool = True
 
+    # talk: speech-to-text + LLM for the live conversation demo
+    stt: bool = True  # load Whisper at startup (~1.5 GB VRAM)
+    stt_model: str = "openai/whisper-large-v3-turbo"
+    llm_base_url: str = "http://127.0.0.1:11434/v1"  # any OpenAI-compatible chat endpoint (Ollama by default)
+    llm_api_key: str = "ollama"
+    llm_model: str = "qwen2.5:3b-instruct"
+    llm_system_prompt: str = (
+        "You are a friendly, concise voice assistant on a phone call. Reply in one to three short sentences. "
+        "Reply in the same language the user spoke (Hindi in Devanagari if they spoke Hindi). "
+        "Never use markdown, lists, emojis or symbols - only plain spoken sentences."
+    )
+
     @property
     def model_list(self) -> list[str]:
         return [m.strip() for m in self.models.split(",") if m.strip()]

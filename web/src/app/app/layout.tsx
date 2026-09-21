@@ -12,6 +12,7 @@ export const useSession = () => useContext(Ctx);
 
 const nav = [
   { href: "/app/", label: "Playground", icon: "▶" },
+  { href: "/app/talk/", label: "Talk", icon: "☎" },
   { href: "/app/voices/", label: "Voices", icon: "◉" },
   { href: "/app/keys/", label: "API keys", icon: "⚿" },
   { href: "/app/usage/", label: "Usage", icon: "▤" },
