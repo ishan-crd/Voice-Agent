@@ -16,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import threading
+from pathlib import Path
 from typing import Iterator
 
 import numpy as np
@@ -33,7 +34,33 @@ FORMATS = {
     "flac": "audio/flac",
 }
 FFMPEG_FORMATS = {"mp3", "opus", "aac", "flac"}
-FFMPEG = shutil.which("ffmpeg")
+
+
+def _find_ffmpeg() -> str | None:
+    """PATH first, then TTS_FFMPEG, then the winget/scoop/choco spots on Windows
+    (a process started before the install won't see the updated PATH)."""
+    import glob
+    import os
+
+    for cand in (os.environ.get("TTS_FFMPEG"), shutil.which("ffmpeg")):
+        if cand and Path(cand).exists():
+            return cand
+    local = os.environ.get("LOCALAPPDATA", "")
+    patterns = [
+        rf"{local}\Microsoft\WinGet\Links\ffmpeg.exe",
+        rf"{local}\Microsoft\WinGet\Packages\Gyan.FFmpeg*\ffmpeg-*\bin\ffmpeg.exe",
+        rf"{os.environ.get('USERPROFILE', '')}\scoop\shims\ffmpeg.exe",
+        r"C:\ProgramData\chocolatey\bin\ffmpeg.exe",
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+    ]
+    for pat in patterns:
+        hits = glob.glob(pat)
+        if hits:
+            return hits[0]
+    return None
+
+
+FFMPEG = _find_ffmpeg()
 
 
 def content_type(fmt: str) -> str:

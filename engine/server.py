@@ -160,7 +160,7 @@ async def synthesize_stream(
     stats["chars"] += len(text)
 
     async def gen() -> AsyncIterator[bytes]:
-        futs: deque[asyncio.Future] = deque()
+        queues: deque[asyncio.Queue] = deque()
         next_idx = 0
         first = True
         audio_secs = 0.0
@@ -168,10 +168,10 @@ async def synthesize_stream(
         def submit(i: int) -> None:
             # first chunk of any request outranks later chunks of every other request:
             # a new caller hears something quickly, long monologues fill in behind
-            futs.append(
-                engine.worker.submit(
-                    lambda: engine.synthesize(kind, chunks[i], conds, lang, params),
-                    priority=0.0 if i == 0 else 1.0,
+            queues.append(
+                engine.worker.submit_stream(
+                    lambda: engine.stream(kind, chunks[i], conds, lang, params),
+                    priority=0 if i == 0 else 1,
                     cancel=cancel,
                 )
             )
@@ -180,20 +180,26 @@ async def synthesize_stream(
             while next_idx < min(settings.lookahead, len(chunks)):
                 submit(next_idx)
                 next_idx += 1
-            while futs:
-                audio = await futs.popleft()
+            while queues:
+                q = queues.popleft()
+                while True:
+                    item = await q.get()
+                    if item is None:
+                        break
+                    if isinstance(item, BaseException):
+                        raise item
+                    audio_secs += len(item) / engine.sr
+                    for b in enc.encode(item):
+                        if first:
+                            first = False
+                            ttfa = (time.perf_counter() - t_start) * 1000
+                            _ttfa_window.append(ttfa)
+                            stats["ttfa_ms_last"] = round(ttfa, 1)
+                            stats["ttfa_ms_avg"] = round(sum(_ttfa_window) / len(_ttfa_window), 1)
+                        yield b
                 if next_idx < len(chunks):
                     submit(next_idx)
                     next_idx += 1
-                audio_secs += len(audio) / engine.sr
-                for b in enc.encode(audio):
-                    if first:
-                        first = False
-                        ttfa = (time.perf_counter() - t_start) * 1000
-                        _ttfa_window.append(ttfa)
-                        stats["ttfa_ms_last"] = round(ttfa, 1)
-                        stats["ttfa_ms_avg"] = round(sum(_ttfa_window) / len(_ttfa_window), 1)
-                    yield b
             for b in enc.finish():
                 yield b
             stats["audio_seconds"] += audio_secs
@@ -203,15 +209,13 @@ async def synthesize_stream(
                 stats["ttfa_ms_last"], (time.perf_counter() - t_start) * 1000,
             )
         except (asyncio.CancelledError, GeneratorExit):
-            log.info("client disconnected; cancelling %d queued chunks", len(chunks) - next_idx + len(futs))
+            log.info("client disconnected; cancelling %d pending chunks", len(chunks) - next_idx + len(queues))
             raise
         except Exception:
             stats["errors"] += 1
             raise
         finally:
             cancel.set()
-            for f in futs:
-                f.cancel()
             enc.close()
 
     return enc, gen()

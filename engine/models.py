@@ -37,7 +37,7 @@ class GenParams:
 
 @dataclass(order=True)
 class _Job:
-    priority: float
+    priority: tuple[int, float]  # (class, submit time): class 0 = first chunk of a request
     seq: int
     fn: Callable[[], Any] = field(compare=False)
     on_done: Callable[[str, Any], None] = field(compare=False)
@@ -47,10 +47,11 @@ class _Job:
 class GpuWorker:
     """Runs callables sequentially on one background thread.
 
-    Priority is the wall-clock time the *request* started, so the caller that
-    has been waiting longest gets its next chunk first.  Combined with the
-    per-request lookahead cap in the server this gives round-robin-ish
-    fairness across concurrent conversations without starving anyone.
+    Jobs are ordered by (priority class, submit time).  The server submits the
+    first chunk of every request as class 0 and the rest as class 1, so a new
+    caller's first audio jumps ahead of everyone else's long tail; within a
+    class it is FIFO, which with the per-request lookahead cap gives
+    round-robin-ish fairness across concurrent conversations.
     """
 
     def __init__(self) -> None:
@@ -69,7 +70,7 @@ class GpuWorker:
         self,
         fn: Callable[[], Any],
         *,
-        priority: float | None = None,
+        priority: int = 1,
         cancel: threading.Event | None = None,
     ) -> asyncio.Future:
         loop = asyncio.get_running_loop()
@@ -88,8 +89,43 @@ class GpuWorker:
 
             loop.call_soon_threadsafe(_apply)
 
-        self._q.put(_Job(priority or time.time(), self._next_seq(), fn, on_done, cancel))
+        self._q.put(_Job((priority, time.time()), self._next_seq(), fn, on_done, cancel))
         return fut
+
+    def submit_stream(
+        self,
+        gen_fn: Callable[[], Iterator[Any]],
+        *,
+        priority: int = 1,
+        cancel: threading.Event | None = None,
+    ) -> asyncio.Queue:
+        """Run a generator on the GPU thread; each yielded item lands in the
+        returned queue as soon as it exists.  `None` marks the end, an
+        Exception instance marks failure.  Stops early when `cancel` is set."""
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue()
+
+        def push(item: Any) -> None:
+            loop.call_soon_threadsafe(q.put_nowait, item)
+
+        def run() -> None:
+            try:
+                for item in gen_fn():
+                    push(item)
+                    if cancel is not None and cancel.is_set():
+                        break
+            except BaseException as e:  # noqa: BLE001
+                log.exception("gpu stream failed")
+                push(e)
+            else:
+                push(None)
+
+        def on_done(status: str, payload: Any) -> None:
+            if status == "cancelled":
+                push(None)
+
+        self._q.put(_Job((priority, time.time()), self._next_seq(), run, on_done, cancel))
+        return q
 
     def run_sync(self, fn: Callable[[], Any]) -> Any:
         """Blocking helper for startup code (no event loop yet)."""
@@ -100,7 +136,7 @@ class GpuWorker:
             box[status] = payload
             done.set()
 
-        self._q.put(_Job(0.0, self._next_seq(), fn, on_done, None))
+        self._q.put(_Job((0, time.time()), self._next_seq(), fn, on_done, None))
         done.wait()
         if "error" in box:
             raise box["error"]
