@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import tempfile
 import threading
@@ -149,8 +150,9 @@ async def synthesize_stream(
     if not chunks:
         raise HTTPException(400, "input has no speakable text")
 
+    gain = settings.gain_turbo if kind == "turbo" else settings.gain_multilingual
     try:
-        enc = StreamEncoder(fmt, engine.sr, sample_rate=sample_rate, speed=speed)
+        enc = StreamEncoder(fmt, engine.sr, sample_rate=sample_rate, gain=gain)
     except (ValueError, RuntimeError) as e:
         raise HTTPException(400, str(e))
 
@@ -170,7 +172,7 @@ async def synthesize_stream(
             # a new caller hears something quickly, long monologues fill in behind
             queues.append(
                 engine.worker.submit_stream(
-                    lambda: engine.stream(kind, chunks[i], conds, lang, params),
+                    lambda: engine.stream(kind, chunks[i], conds, lang, params, speed=speed),
                     priority=0 if i == 0 else 1,
                     cancel=cancel,
                 )
@@ -321,7 +323,9 @@ async def add_voice(
     data = await file.read()
     if len(data) > 25 * 1024 * 1024:
         raise HTTPException(413, "clip too large (25 MB max)")
-    tmp = Path(tempfile.mkstemp(suffix=suffix, dir=registry.root)[1])
+    fd, tmp_name = tempfile.mkstemp(suffix=suffix, dir=registry.cache_dir)
+    os.close(fd)  # Windows locks the file while the descriptor is open
+    tmp = Path(tmp_name)
     tmp.write_bytes(data)
     try:
         voice = await registry.add(

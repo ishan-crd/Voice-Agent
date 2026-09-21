@@ -255,8 +255,13 @@ class TTSEngine:
                 continue
             try:
                 t0 = time.perf_counter()
-                for _ in range(2):
-                    self.synthesize(kind, "Warm up, this is a longer sentence to settle the kernels.", conds, "en", GenParams())
+                texts = [
+                    "Warm up.",
+                    "Warm up, this is a longer sentence to settle the kernels and the allocator.",
+                    "And one more, with a few clauses, so every early block length has been seen once before real traffic arrives.",
+                ]
+                for t in texts:
+                    self.synthesize(kind, t, conds, "en", GenParams())
                 log.info("warmed %s in %.2fs", kind, time.perf_counter() - t0)
             except Exception:  # noqa: BLE001
                 log.exception("warmup failed for %s", kind)
@@ -297,6 +302,7 @@ class TTSEngine:
         conds,
         language: str,
         params: GenParams,
+        speed: float = 1.0,
     ) -> Iterator[np.ndarray]:
         """Yield float32 mono 24 kHz audio blocks as they are produced.
 
@@ -310,7 +316,7 @@ class TTSEngine:
 
         streamer = self.streamers.get(kind)
         if streamer is not None:
-            yield from streamer.stream(text, conds, params, language=language)
+            yield from streamer.stream(text, conds, params, language=language, speed=speed)
             return
 
         model = self.models[kind]

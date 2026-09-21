@@ -409,6 +409,10 @@ class ChunkedStreamer:
         mels = mels[:, :, :n_mel].to(self.model.s3gen.dtype)
         new = mels[:, :, state["emitted"] :]
         state["emitted"] = mels.shape[2]
+        speed = state.get("speed", 1.0)
+        if abs(speed - 1.0) > 1e-3 and new.shape[2] > 1:
+            # tempo without pitch change: stretch the mel time axis before the vocoder
+            new = F.interpolate(new, size=max(1, round(new.shape[2] / speed)), mode="linear", align_corners=False)
 
         cache = state.get("hift")
         if cache is not None:
@@ -432,14 +436,14 @@ class ChunkedStreamer:
         return speech
 
     # -------------------------------------------------------------- public
-    def stream(self, text: str, conds, params: GenParams, language: str = "en") -> Iterator[np.ndarray]:
+    def stream(self, text: str, conds, params: GenParams, language: str = "en", speed: float = 1.0) -> Iterator[np.ndarray]:
         """Yield float32 24 kHz audio blocks for `text` as soon as each is ready."""
         if params.seed is not None:
             torch.manual_seed(params.seed)
         self.language = language
         ref = conds.gen
         noise = torch.randn(1, 80, MAX_MEL_FRAMES, device=self.device, dtype=self.model.s3gen.dtype)
-        state: dict = {"emitted": 0}
+        state: dict = {"emitted": 0, "speed": speed}
         all_tokens: list[torch.Tensor] = []
 
         # every block is vocoded as soon as it exists (flow drops a 3-token

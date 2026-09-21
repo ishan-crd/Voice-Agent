@@ -78,13 +78,18 @@ def resample(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     return AF.resample(t, sr_in, sr_out).squeeze(0).numpy()
 
 
-def time_stretch(x: np.ndarray, sr: int, speed: float) -> np.ndarray:
-    """Change tempo without changing pitch (OpenAI `speed` semantics)."""
-    if abs(speed - 1.0) < 1e-3:
+def soft_limit(x: np.ndarray, gain: float = 1.0, ceiling: float = 0.95) -> np.ndarray:
+    """Apply a gain, then bend anything above `ceiling` with tanh instead of
+    hard-clipping (the multilingual model peaks at full scale)."""
+    if gain != 1.0:
+        x = x * gain
+    peak = float(np.abs(x).max()) if x.size else 0.0
+    if peak <= ceiling:
         return x
-    import librosa
-
-    return librosa.effects.time_stretch(x, rate=speed).astype(np.float32)
+    over = np.abs(x) > ceiling
+    y = x.copy()
+    y[over] = np.sign(x[over]) * (ceiling + (1.0 - ceiling) * np.tanh((np.abs(x[over]) - ceiling) / (1.0 - ceiling)))
+    return y.astype(np.float32)
 
 
 def to_int16(x: np.ndarray) -> np.ndarray:
@@ -228,12 +233,12 @@ class FfmpegEncoder:
 class StreamEncoder:
     """Stateful per-response encoder: `encode(chunk)` then `finish()`."""
 
-    def __init__(self, fmt: str, sr_in: int, sample_rate: int | None = None, speed: float = 1.0) -> None:
+    def __init__(self, fmt: str, sr_in: int, sample_rate: int | None = None, gain: float = 1.0) -> None:
         if fmt not in FORMATS:
             raise ValueError(f"unsupported response_format {fmt!r}; choose from {sorted(FORMATS)}")
         self.fmt = fmt
         self.sr_in = sr_in
-        self.speed = speed
+        self.gain = gain
         if fmt in ("mulaw", "alaw"):
             self.sr_out = sample_rate or 8000
         else:
@@ -246,7 +251,7 @@ class StreamEncoder:
         return FORMATS[self.fmt]
 
     def encode(self, audio: np.ndarray) -> Iterator[bytes]:
-        audio = time_stretch(audio, self.sr_in, self.speed)
+        audio = soft_limit(audio, self.gain)
         audio = resample(audio, self.sr_in, self.sr_out)
         if self.fmt == "pcm":
             yield pcm16_bytes(audio)

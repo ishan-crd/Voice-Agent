@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     models: str = "turbo,multilingual"  # comma-separated: turbo | multilingual
     device: str = "cuda"
     watermark: bool = True
+    # output gain per model so voices sit at a similar level when switching languages
+    gain_turbo: float = 1.0
+    gain_multilingual: float = 0.4
 
     # voices
     voices_dir: Path = Path("voices")
