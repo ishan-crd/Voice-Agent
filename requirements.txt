@@ -1,0 +1,12 @@
+# Install order matters on Windows: CUDA torch FIRST, then this file.
+#   .venv\Scripts\pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+#   .venv\Scripts\pip install -r requirements.txt
+chatterbox-tts==0.1.7
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pydantic>=2.7
+pydantic-settings>=2.3
+soundfile>=0.12
+numpy<2
+httpx>=0.27

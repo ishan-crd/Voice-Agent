@@ -1,0 +1,30 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+
+# env / secrets
+.env
+*.key
+
+# model + voice caches
+voices/.cache/
+voices/*.wav
+voices/*.mp3
+voices/*.flac
+!voices/README.md
+out/
+*.log
+
+# node
+node_modules/
+.next/
+dist/
+
+# os / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
