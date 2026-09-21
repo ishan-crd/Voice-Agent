@@ -70,6 +70,45 @@ def _chunk_mask_capture_safe(xs, masks, use_dynamic_chunk, use_dynamic_left_chun
     return masks
 
 
+# ------------------------------------------------------------ silence trim
+LEAD_KEEP_MS = 40  # the model puts 100-130 ms of dead air before the first word
+TRAIL_KEEP_MS = 120  # and 230-640 ms after the last one; both read as lag in a conversation
+
+
+def _voiced_frames(wav: np.ndarray, sr: int, frame_ms: int = 10) -> tuple[np.ndarray, int]:
+    frame = sr * frame_ms // 1000
+    n = len(wav) // frame
+    if n == 0:
+        return np.zeros(0, dtype=bool), frame
+    rms = np.sqrt((wav[: n * frame].reshape(n, frame) ** 2).mean(axis=1))
+    thr = max(0.006, float(rms.max()) * 0.04)
+    return rms > thr, frame
+
+
+def trim_leading_silence(wav: np.ndarray, sr: int) -> tuple[np.ndarray, bool]:
+    """Cut silence before the first voiced frame, keeping LEAD_KEEP_MS.
+    Returns (audio, done): done=False means the whole block was silent - drop it and keep looking."""
+    voiced, frame = _voiced_frames(wav, sr)
+    idx = np.flatnonzero(voiced)
+    if len(idx) == 0:
+        return wav[:0], False
+    keep = max(0, idx[0] * frame - sr * LEAD_KEEP_MS // 1000)
+    return wav[keep:], True
+
+
+def trim_trailing_silence(wav: np.ndarray, sr: int) -> np.ndarray:
+    voiced, frame = _voiced_frames(wav, sr)
+    idx = np.flatnonzero(voiced)
+    if len(idx) == 0:
+        return wav
+    end = min(len(wav), (idx[-1] + 1) * frame + sr * TRAIL_KEEP_MS // 1000)
+    out = wav[:end].copy()
+    fade = min(len(out), sr * 8 // 1000)  # 8 ms fade so the cut never clicks
+    if fade:
+        out[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+    return out
+
+
 # ============================================================ CFM graphs
 class CfmGraphs:
     """The CFM Euler solve captured as one CUDA graph per mel-length bucket.
@@ -449,16 +488,26 @@ class ChunkedStreamer:
         # every block is vocoded as soon as it exists (flow drops a 3-token
         # lookahead so the boundary is stable); a final pass with finalize=True
         # emits those held-back frames plus the closing silence
+        lead_done = False
         for block in self._stream_tokens(text, conds.t3, params):
             all_tokens.append(block)
             out = self._vocode(torch.cat(all_tokens), ref, noise, finalize=False, state=state)
             if out is not None:
-                yield self._finish(out)
+                wav = self._finish(out)
+                if not lead_done:
+                    wav, lead_done = trim_leading_silence(wav, self.model.sr)
+                if len(wav):
+                    yield wav
 
         if all_tokens:
             out = self._vocode(torch.cat(all_tokens), ref, noise, finalize=True, state=state)
             if out is not None:
-                yield self._finish(out)
+                wav = self._finish(out)
+                if not lead_done:
+                    wav, lead_done = trim_leading_silence(wav, self.model.sr)
+                wav = trim_trailing_silence(wav, self.model.sr)
+                if len(wav):
+                    yield wav
 
     def _finish(self, speech: torch.Tensor) -> np.ndarray:
         wav = speech.squeeze(0).float().cpu().numpy()

@@ -50,8 +50,11 @@ class Whisper:
         kw = {"task": "transcribe", "max_new_tokens": 160}
         if language:
             kw["language"] = language
+        t1 = time.perf_counter()
         with self._lock, torch.inference_mode():
             ids = self.model.generate(feats, **kw)
+            torch.cuda.synchronize()
+        log.debug("whisper: features %.0f ms, generate %.0f ms (%d tok, lang=%s)", (t1 - t0) * 1000, (time.perf_counter() - t1) * 1000, ids.shape[1], language)
         raw = self.processor.batch_decode(ids, skip_special_tokens=False)[0]
         text = self.processor.batch_decode(ids, skip_special_tokens=True)[0].strip()
         m = _LANG_RE.search(raw)

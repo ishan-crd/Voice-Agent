@@ -29,6 +29,17 @@ npm install --no-audit --no-fund
 npm run build
 Pop-Location
 
+Write-Host "== GPU clocks" -ForegroundColor Cyan
+# A voice server is a bursty workload: the driver drops the clocks between requests and
+# ramps them back per request, which costs 200-400 ms of first-audio latency and makes
+# Whisper 2-3x slower. A logon task locks the clocks (needs one UAC prompt; ~40 W extra idle).
+$nv = (Get-Command nvidia-smi -ErrorAction SilentlyContinue).Source
+if ($nv) {
+    $lock = "schtasks /Create /F /RU SYSTEM /SC ONLOGON /RL HIGHEST /TN VoiceAgentGpuClocks /TR `"\`"$nv\`" -lgc 1695,1830`" & schtasks /Run /TN VoiceAgentGpuClocks"
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $lock -Verb RunAs -Wait
+    Write-Host "clock lock task created (undo: schtasks /Delete /TN VoiceAgentGpuClocks /F ; nvidia-smi -rgc)"
+}
+
 if (-not (Test-Path .env)) { Copy-Item .env.example .env; Write-Host "created .env from .env.example - edit it before going public" -ForegroundColor Yellow }
 
 Write-Host ""

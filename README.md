@@ -98,6 +98,18 @@ Measured on the built-in voice, RTX 3090, over HTTP with keep-alive: English TTF
 
 `scripts/profile_*.py` reproduce every number above; `scripts/bench_ttfb.py` measures the HTTP path.
 
+**Lock the GPU clocks.** A voice server is bursty; between requests the driver drops to idle clocks and ramps back per request, which adds 200-400 ms to first audio and makes Whisper 2-3x slower while the TTS engine is resident. `setup.ps1` installs a logon task that runs `nvidia-smi -lgc 1695,1830` (RTX 3090 values; ~40 W extra at idle, undo with `nvidia-smi -rgc`). On Linux: `sudo nvidia-smi -lgc 1695,1830`.
+
+### Talk latency (release the button -> first sound), RTX 3090
+
+| Turn | STT | first LLM token | first audio |
+|---|---|---|---|
+| spoken English | ~200 ms | ~300 ms | **~490 ms** |
+| typed English | - | ~30 ms | ~320 ms |
+| typed Hindi | - | ~70 ms | ~870 ms |
+
+How: the browser streams 16 kHz PCM while the button is held (no webm encode/decode on release); Whisper runs the instant the button is released; the first clause of the reply (>= 5 words, or 12 words) goes to TTS before the sentence ends; 100-130 ms of leading and 230-640 ms of trailing silence are trimmed from every TTS chunk.
+
 ---
 
 ## Selling it: gateway + console

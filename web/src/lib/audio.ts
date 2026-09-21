@@ -42,7 +42,7 @@ export class PcmPlayer {
     src.connect(this.analyser);
     const now = this.ctx.currentTime;
     // small initial cushion so scheduling jitter never causes a gap
-    if (this.nextTime < now + 0.02) this.nextTime = now + 0.06;
+    if (this.nextTime < now + 0.015) this.nextTime = now + 0.035;
     src.start(this.nextTime);
     this.nextTime += buf.duration;
     this.sources.push(src);
@@ -88,4 +88,67 @@ export function pcmToWav(pcm: Uint8Array, sampleRate = 24000): Blob {
   w(36, "data");
   v.setUint32(40, pcm.length, true);
   return new Blob([header, pcm as BlobPart], { type: "audio/wav" });
+}
+
+/** Captures the microphone as 16 kHz int16 frames while `capturing` is true.
+ *  The stream stays open between turns so a press never waits on getUserMedia. */
+export class MicCapture {
+  private ctx: AudioContext | null = null;
+  private node: AudioWorkletNode | null = null;
+  private stream: MediaStream | null = null;
+  private capturing = false;
+  onFrame: ((frame: ArrayBuffer) => void) | null = null;
+
+  async open(): Promise<void> {
+    if (this.ctx) return;
+    this.stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    const worklet = `
+      class Cap extends AudioWorkletProcessor {
+        constructor() { super(); this.on = false; this.buf = []; this.n = 0;
+          this.port.onmessage = (e) => { this.on = e.data; if (!this.on) this.flush(); }; }
+        flush() { if (!this.n) return; const out = new Int16Array(this.n); let o = 0;
+          for (const c of this.buf) { for (let i = 0; i < c.length; i++) { const v = Math.max(-1, Math.min(1, c[i])); out[o++] = v < 0 ? v * 32768 : v * 32767; } }
+          this.port.postMessage(out.buffer, [out.buffer]); this.buf = []; this.n = 0; }
+        process(inputs) { const ch = inputs[0] && inputs[0][0]; if (this.on && ch) { this.buf.push(Float32Array.from(ch)); this.n += ch.length; if (this.n >= 640) this.flush(); } return true; }
+      }
+      registerProcessor("cap", Cap);`;
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([worklet], { type: "application/javascript" })));
+    const src = ctx.createMediaStreamSource(this.stream);
+    const node = new AudioWorkletNode(ctx, "cap");
+    node.port.onmessage = (e) => this.onFrame?.(e.data as ArrayBuffer);
+    src.connect(node);
+    // keep the graph alive without routing the mic to the speakers
+    const sink = ctx.createGain();
+    sink.gain.value = 0;
+    node.connect(sink).connect(ctx.destination);
+    this.ctx = ctx;
+    this.node = node;
+  }
+
+  get isOpen() {
+    return !!this.ctx;
+  }
+
+  async start() {
+    await this.open();
+    await this.ctx!.resume();
+    this.capturing = true;
+    this.node!.port.postMessage(true);
+  }
+
+  stop() {
+    if (!this.capturing) return;
+    this.capturing = false;
+    this.node?.port.postMessage(false);
+  }
+
+  close() {
+    this.stop();
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.ctx?.close().catch(() => {});
+    this.ctx = null;
+    this.node = null;
+    this.stream = null;
+  }
 }

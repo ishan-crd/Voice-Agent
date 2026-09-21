@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { API_BASE, Voice, api, fmtMs, getKey, preferredVoice, rememberVoice } from "@/lib/api";
-import { PcmPlayer } from "@/lib/audio";
+import { MicCapture, PcmPlayer } from "@/lib/audio";
 import { Field, Stat } from "@/components/ui";
 
 type Msg = { role: "user" | "assistant"; text: string; pending?: boolean };
@@ -36,8 +36,8 @@ export default function Talk() {
   const [err, setErr] = useState("");
   const ws = useRef<WebSocket | null>(null);
   const player = useRef<PcmPlayer | null>(null);
-  const rec = useRef<MediaRecorder | null>(null);
-  const chunks = useRef<Blob[]>([]);
+  const mic = useRef<MicCapture | null>(null);
+  const [micState, setMicState] = useState<"unknown" | "ready" | "denied">("unknown");
   const tRelease = useRef<number>(0);
   const clientFirst = useRef<number | null>(null);
   const bottom = useRef<HTMLDivElement | null>(null);
@@ -50,9 +50,19 @@ export default function Talk() {
       })
       .catch(() => {});
     connect();
+    // open the microphone once so pressing the button never waits on a permission prompt
+    const m = new MicCapture();
+    mic.current = m;
+    m.onFrame = (frame) => {
+      if (ws.current?.readyState === WebSocket.OPEN) ws.current.send(frame);
+    };
+    m.open()
+      .then(() => setMicState("ready"))
+      .catch(() => setMicState("denied"));
     return () => {
       ws.current?.close();
       player.current?.close();
+      m.close();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -140,31 +150,24 @@ export default function Talk() {
     player.current?.stop();
     send({ type: "cancel" });
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      const mr = new MediaRecorder(stream);
-      chunks.current = [];
-      mr.ondataavailable = (e) => chunks.current.push(e.data);
-      mr.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(chunks.current, { type: mr.mimeType || "audio/webm" });
-        const b64 = await blobToB64(blob);
-        tRelease.current = performance.now();
-        clientFirst.current = null;
-        setTimings(null);
-        setPhase("hearing");
-        setMsgs((h) => [...h, { role: "user", text: "…", pending: true }]);
-        send({ type: "turn", audio: b64, mime: blob.type });
-      };
-      mr.start();
-      rec.current = mr;
+      send({ type: "turn_start" });
+      await mic.current!.start(); // frames stream to the server while you hold the button
+      setMicState("ready");
       setPhase("recording");
     } catch {
-      setErr("microphone access denied");
+      setMicState("denied");
+      setErr("microphone access denied - allow the mic for this site and reload");
     }
   }
   function stopRec() {
-    if (rec.current?.state === "recording") rec.current.stop();
-    rec.current = null;
+    if (phase !== "recording") return;
+    mic.current?.stop();
+    tRelease.current = performance.now();
+    clientFirst.current = null;
+    setTimings(null);
+    setPhase("hearing");
+    setMsgs((h) => [...h, { role: "user", text: "…", pending: true }]);
+    send({ type: "turn_end" }); // the server already has the audio: STT starts now
   }
 
   async function sendTyped() {
@@ -251,7 +254,7 @@ export default function Talk() {
               {phase === "hearing" && "Transcribing…"}
               {phase === "thinking" && "Thinking…"}
               {phase === "speaking" && "Speaking — press the button to interrupt"}
-              {phase === "idle" && "Hold to talk"}
+              {phase === "idle" && (micState === "denied" ? "Microphone blocked - allow it in the address bar" : "Hold to talk")}
             </div>
             <form
               className="flex w-full max-w-md gap-2"
@@ -322,13 +325,4 @@ export default function Talk() {
       </div>
     </div>
   );
-}
-
-function blobToB64(blob: Blob): Promise<string> {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onload = () => res((r.result as string).split(",")[1]);
-    r.onerror = rej;
-    r.readAsDataURL(blob);
-  });
 }

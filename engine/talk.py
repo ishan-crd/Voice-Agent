@@ -2,8 +2,10 @@
 
 One WebSocket per conversation.  Messages:
 
-  client -> server   JSON {"type":"config", "voice", "language", "system"}   (optional, any time)
-                     JSON {"type":"turn", "audio": <base64>, "mime": "audio/webm"}   one user utterance
+  client -> server   JSON {"type":"config", "voice", "language", "system", "speed"}   (optional, any time)
+                     JSON {"type":"turn_start"} · BINARY int16 16 kHz mono frames · JSON {"type":"turn_end"}
+                                                                             live mic audio; STT runs the instant turn_end arrives
+                     JSON {"type":"turn", "audio": <base64>, "mime": "audio/webm"}   one whole utterance (API clients)
                      JSON {"type":"text", "text": "..."}                     typed turn (no STT)
                      JSON {"type":"cancel"}                                  barge-in
                      JSON {"type":"reset"}                                   clear history
@@ -43,6 +45,9 @@ from .models import GenParams
 log = logging.getLogger("tts.talk")
 
 _TERM = re.compile(r"[.!?।॥。！？]\s*$")
+_CLAUSE = re.compile(r"[,;:—–]\s*$")
+FIRST_CLAUSE_MIN_WORDS = 5  # hand the first clause to TTS early instead of waiting for the full sentence
+FIRST_CLAUSE_MAX_WORDS = 12
 
 # script -> language the TTS should use for a sentence; Latin falls back to the
 # conversation language so English-only Turbo never receives text it can't speak
@@ -177,6 +182,7 @@ class Conversation:
         self.cancel = threading.Event()
         self.turn_task: asyncio.Task | None = None
         self.meter = None  # set by the server: (chars, audio_s, ttfa_ms, total_ms, lang, kind) -> None
+        self._pcm = bytearray()  # live mic frames of the turn being recorded
         self._audio_s = 0.0
         self._kind = ""
 
@@ -189,9 +195,23 @@ class Conversation:
         await self.send(type="ready", llm=info, llm_ok=ok, stt=self.stt is not None and self.stt.model_id, voice=self.voice)
         try:
             while True:
-                msg = json.loads(await self.ws.receive_text())
+                raw = await self.ws.receive()
+                if raw.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect(raw.get("code", 1000))
+                if raw.get("bytes") is not None:
+                    self._pcm += raw["bytes"]
+                    continue
+                msg = json.loads(raw.get("text") or "{}")
                 t = msg.get("type")
-                if t == "config":
+                if t == "turn_start":
+                    await self._cancel()
+                    self._pcm = bytearray()
+                elif t == "turn_end":
+                    pcm, self._pcm = bytes(self._pcm), bytearray()
+                    audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+                    self.cancel = threading.Event()
+                    self.turn_task = asyncio.create_task(self._turn({"type": "pcm", "audio": audio}))
+                elif t == "config":
                     self.voice = msg.get("voice") or self.voice
                     self.language = msg.get("language") or None
                     if msg.get("speed"):
@@ -226,11 +246,14 @@ class Conversation:
         cancel = self.cancel
         try:
             # 1. hear
-            if msg["type"] == "turn":
+            if msg["type"] in ("turn", "pcm"):
                 if self.stt is None:
                     await self.send(type="error", message="speech-to-text is disabled on this server (TTS_STT=0)")
                     return
-                audio = await asyncio.to_thread(_decode_turn, msg["audio"], msg.get("mime", "audio/webm"))
+                if msg["type"] == "pcm":
+                    audio = msg["audio"]  # already float32 16 kHz: nothing to decode
+                else:
+                    audio = await asyncio.to_thread(_decode_turn, msg["audio"], msg.get("mime", "audio/webm"))
                 if len(audio) < 16_000 * 0.3:
                     await self.send(type="error", message="that was too short - hold the button while you speak")
                     return
@@ -268,6 +291,7 @@ class Conversation:
                 buf = ""
                 first = True
                 drifted = False
+                n_sent = 0
                 async for tok in self.llm.stream(messages):
                     if cancel.is_set():
                         break
@@ -275,15 +299,25 @@ class Conversation:
                         first = False
                         timings["llm_first_token_ms"] = timings["llm_first_token_ms"] or round((time.perf_counter() - t0) * 1000)
                     reply += tok
-                    buf += tok
                     # wrong script anywhere in the reply -> restart with a firmer instruction
                     if attempt == 0 and foreign_letters(reply, lang):
                         drifted = True
                         break
                     await self.send(type="token", text=tok)
+                    # the first piece of speech goes out at the first clause boundary (or ~12
+                    # words), not at the first full stop: that is 200-400 ms off first audio
+                    words = len(buf.split())
+                    if n_sent == 0 and tok[:1].isspace() and words >= FIRST_CLAUSE_MIN_WORDS and not _TERM.search(buf):
+                        if _CLAUSE.search(buf) or words >= FIRST_CLAUSE_MAX_WORDS:
+                            piece = buf.strip()
+                            await sentences.put(piece if piece[-1] in ",;:—–" else piece + ",")
+                            n_sent += 1
+                            buf = ""
+                    buf += tok
                     if _TERM.search(buf) and len(buf.strip()) > 2:
                         for sent in split_sentences(buf):
                             await sentences.put(sent)
+                            n_sent += 1
                         buf = ""
                 if drifted:
                     log.warning("talk: LLM answered in the wrong script (%r); retrying with a forced language", reply[:40])

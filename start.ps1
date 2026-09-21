@@ -25,6 +25,12 @@ if ($ollama) {
     try { $null = Invoke-RestMethod http://127.0.0.1:11434/api/version -TimeoutSec 2 } catch { Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden }
 }
 
+# warn if the GPU clocks are not locked (see setup.ps1): idle SM clock sits at ~200-800 MHz otherwise
+try {
+    $sm = [int]((nvidia-smi --query-gpu=clocks.sm --format=csv,noheader,nounits) | Select-Object -First 1)
+    if ($sm -lt 1500) { Write-Host "note: GPU clocks are not locked - first audio will be ~300 ms slower. Run .\setup.ps1 once (or: nvidia-smi -lgc 1695,1830 as admin)." -ForegroundColor Yellow }
+} catch {}
+
 # already running? just open the console
 try {
     $null = Invoke-RestMethod http://127.0.0.1:8000/health -TimeoutSec 2
