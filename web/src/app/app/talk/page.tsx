@@ -18,6 +18,13 @@ export default function Talk() {
   const [voices, setVoices] = useState<Voice[]>([]);
   const [voice, setVoice] = useState("default");
   const [language, setLanguage] = useState("auto");
+  const [speed, setSpeed] = useState(() => {
+    try {
+      return Number(localStorage.getItem("va_talk_speed") || 1.1);
+    } catch {
+      return 1.1;
+    }
+  });
   const [persona, setPersona] = useState("assistant");
   const [system, setSystem] = useState(PERSONAS.assistant);
   const [status, setStatus] = useState<{ llm: string; llm_ok: boolean; stt: string | false } | null>(null);
@@ -55,9 +62,12 @@ export default function Talk() {
   }, [msgs, phase]);
 
   useEffect(() => {
-    send({ type: "config", voice, language: language === "auto" ? null : language, system });
+    send({ type: "config", voice, language: language === "auto" ? null : language, system, speed });
+    try {
+      localStorage.setItem("va_talk_speed", String(speed));
+    } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [voice, language, system, conn]);
+  }, [voice, language, system, speed, conn]);
 
   function connect() {
     const url = `${API_BASE.replace(/^http/, "ws")}/v1/talk?api_key=${encodeURIComponent(getKey())}`;
@@ -280,6 +290,9 @@ export default function Talk() {
               <option value="en">English</option>
               <option value="hi">Hindi</option>
             </select>
+          </Field>
+          <Field label={`Speaking speed · ${speed.toFixed(2)}×`} hint="pitch stays the same">
+            <input type="range" min={0.8} max={1.5} step={0.05} value={speed} onChange={(e) => setSpeed(Number(e.target.value))} className="w-full accent-[var(--accent)]" />
           </Field>
           <Field label="Persona">
             <select

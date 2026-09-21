@@ -171,6 +171,7 @@ class Conversation:
         self.llm = llm
         self.voice = settings.default_voice
         self.language: str | None = None
+        self.speed = 1.0
         self.system = settings.llm_system_prompt
         self.history: list[dict] = []
         self.cancel = threading.Event()
@@ -193,6 +194,8 @@ class Conversation:
                 if t == "config":
                     self.voice = msg.get("voice") or self.voice
                     self.language = msg.get("language") or None
+                    if msg.get("speed"):
+                        self.speed = max(0.7, min(1.6, float(msg["speed"])))
                     if msg.get("system"):
                         self.system = msg["system"]
                 elif t == "reset":
@@ -338,7 +341,7 @@ class Conversation:
             await self.send(type="sentence", text=s)
             for chunk in chunk_text(s):
                 q = self.engine.worker.submit_stream(
-                    lambda c=chunk, k=kind, cd=conds, l=s_lang: self.engine.stream(k, c, cd, l, params), priority=0, cancel=cancel
+                    lambda c=chunk, k=kind, cd=conds, l=s_lang, sp=self.speed: self.engine.stream(k, c, cd, l, params, speed=sp), priority=0, cancel=cancel
                 )
                 while True:
                     item = await q.get()
