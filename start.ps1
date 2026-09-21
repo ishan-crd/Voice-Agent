@@ -17,6 +17,13 @@ if ($Tunnel) {
     Write-Host "cloudflared prints a https://*.trycloudflare.com URL above - that is your public base URL" -ForegroundColor Yellow
 }
 
+# local LLM for the Talk page (optional): start Ollama if installed and not running
+$ollama = Get-Command ollama -ErrorAction SilentlyContinue
+if (-not $ollama -and (Test-Path "$env:LOCALAPPDATA\Programs\Ollama\ollama.exe")) { $env:PATH += ";$env:LOCALAPPDATA\Programs\Ollama"; $ollama = $true }
+if ($ollama) {
+    try { $null = Invoke-RestMethod http://127.0.0.1:11434/api/version -TimeoutSec 2 } catch { Start-Process ollama -ArgumentList "serve" -WindowStyle Hidden }
+}
+
 # already running? just open the console
 try {
     $null = Invoke-RestMethod http://127.0.0.1:8000/health -TimeoutSec 2
