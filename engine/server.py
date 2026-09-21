@@ -25,6 +25,9 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, Upload
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from gateway import auth
+from gateway.db import PLANS, Principal
+
 from .audio import FORMATS, StreamEncoder
 from .chunking import chunk_text
 from .config import settings
@@ -69,23 +72,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Voice-Agent TTS", version="0.1.0", lifespan=lifespan)
 
 
-# ----------------------------------------------------------------------- auth
-async def require_key(request: Request) -> None:
-    keys = settings.api_key_set
-    if not keys:
-        return
-    auth = request.headers.get("authorization", "")
-    token = auth[7:].strip() if auth.lower().startswith("bearer ") else request.headers.get("xi-api-key", "")
-    if token not in keys:
-        raise HTTPException(401, "invalid or missing API key")
-
-
 # --------------------------------------------------------------------- schema
 class SpeechRequest(BaseModel):
     """OpenAI /v1/audio/speech body plus Chatterbox extensions."""
 
     model: str = "chatterbox"
-    input: str = Field(min_length=1, max_length=8192)
+    input: str = Field(min_length=1, max_length=4096)
     voice: str = settings.default_voice
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm", "mulaw", "alaw"] = "mp3"
     speed: float = Field(1.0, ge=0.5, le=2.0)
@@ -107,7 +99,7 @@ class ElevenVoiceSettings(BaseModel):
 
 
 class ElevenRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=8192)
+    text: str = Field(min_length=1, max_length=4096)
     model_id: str | None = None
     language_code: str | None = None
     voice_settings: ElevenVoiceSettings | None = None
@@ -123,8 +115,19 @@ def _detect_language(text: str, explicit: str | None, voice_lang: str) -> str:
     return voice_lang or "en"
 
 
+def _can_use_voice(p: Principal, voice_id: str) -> bool:
+    if p.is_admin or auth.store is None:
+        return True
+    v = registry.voices.get(voice_id)
+    if v is not None and v.builtin:
+        return True
+    return auth.store.voice_owner(voice_id) == p.account_id
+
+
 async def synthesize_stream(
     *,
+    p: Principal,
+    endpoint: str,
     text: str,
     voice_id: str,
     fmt: str,
@@ -134,9 +137,12 @@ async def synthesize_stream(
     model: str | None = None,
     params: GenParams,
 ) -> tuple[StreamEncoder, AsyncIterator[bytes]]:
+    auth.check_quota(p, len(text))
     try:
         voice = registry.resolve(voice_id)
     except KeyError:
+        raise HTTPException(404, f"unknown voice {voice_id!r}; GET /v1/voices for the list")
+    if not _can_use_voice(p, voice.id):
         raise HTTPException(404, f"unknown voice {voice_id!r}; GET /v1/voices for the list")
 
     lang = _detect_language(text, language, voice.language)
@@ -160,12 +166,16 @@ async def synthesize_stream(
     t_start = time.perf_counter()
     stats["requests"] += 1
     stats["chars"] += len(text)
+    slot = auth.concurrency_slot(p)
+    slot.__enter__()  # raises 429 before any audio if the account is at its limit
 
     async def gen() -> AsyncIterator[bytes]:
         queues: deque[asyncio.Queue] = deque()
         next_idx = 0
         first = True
         audio_secs = 0.0
+        ttfa_ms: float | None = None
+        status = 200
 
         def submit(i: int) -> None:
             # first chunk of any request outranks later chunks of every other request:
@@ -194,9 +204,9 @@ async def synthesize_stream(
                     for b in enc.encode(item):
                         if first:
                             first = False
-                            ttfa = (time.perf_counter() - t_start) * 1000
-                            _ttfa_window.append(ttfa)
-                            stats["ttfa_ms_last"] = round(ttfa, 1)
+                            ttfa_ms = (time.perf_counter() - t_start) * 1000
+                            _ttfa_window.append(ttfa_ms)
+                            stats["ttfa_ms_last"] = round(ttfa_ms, 1)
                             stats["ttfa_ms_avg"] = round(sum(_ttfa_window) / len(_ttfa_window), 1)
                         yield b
                 if next_idx < len(chunks):
@@ -211,14 +221,22 @@ async def synthesize_stream(
                 stats["ttfa_ms_last"], (time.perf_counter() - t_start) * 1000,
             )
         except (asyncio.CancelledError, GeneratorExit):
+            status = 499
             log.info("client disconnected; cancelling %d pending chunks", len(chunks) - next_idx + len(queues))
             raise
         except Exception:
+            status = 500
             stats["errors"] += 1
             raise
         finally:
             cancel.set()
             enc.close()
+            slot.__exit__(None, None, None)
+            auth.record(
+                p, endpoint=endpoint, model=kind, voice=voice.id, language=lang, format=fmt,
+                chars=len(text), audio_s=round(audio_secs, 2), ttfa_ms=ttfa_ms,
+                total_ms=round((time.perf_counter() - t_start) * 1000, 1), status=status,
+            )
 
     return enc, gen()
 
@@ -234,8 +252,8 @@ async def _respond(enc: StreamEncoder, body: AsyncIterator[bytes], stream: bool)
 
 
 # ------------------------------------------------------------- OpenAI route
-@app.post("/v1/audio/speech", dependencies=[Depends(require_key)])
-async def openai_speech(req: SpeechRequest):
+@app.post("/v1/audio/speech")
+async def openai_speech(req: SpeechRequest, p: Principal = Depends(auth.principal)):
     params = GenParams(
         exaggeration=req.exaggeration,
         cfg_weight=req.cfg_weight,
@@ -243,6 +261,8 @@ async def openai_speech(req: SpeechRequest):
         seed=req.seed,
     )
     enc, body = await synthesize_stream(
+        p=p,
+        endpoint="openai.speech",
         text=req.input,
         voice_id=req.voice,
         fmt=req.response_format,
@@ -270,7 +290,7 @@ def _eleven_output(output_format: str | None) -> tuple[str, int | None]:
     return {"ulaw": "mulaw"}.get(codec, codec), sr
 
 
-async def _eleven(voice_id: str, req: ElevenRequest, output_format: str | None, stream: bool) -> Response:
+async def _eleven(p: Principal, voice_id: str, req: ElevenRequest, output_format: str | None, stream: bool) -> Response:
     fmt, sr = _eleven_output(output_format)
     vs = req.voice_settings or ElevenVoiceSettings()
     exaggeration = 0.5
@@ -280,6 +300,8 @@ async def _eleven(voice_id: str, req: ElevenRequest, output_format: str | None, 
         exaggeration = max(0.0, min(1.0, 1.0 - vs.stability))
     params = GenParams(exaggeration=exaggeration, seed=req.seed)
     enc, body = await synthesize_stream(
+        p=p,
+        endpoint="eleven.tts",
         text=req.text,
         voice_id=voice_id,
         fmt=fmt,
@@ -292,23 +314,24 @@ async def _eleven(voice_id: str, req: ElevenRequest, output_format: str | None, 
     return await _respond(enc, body, stream)
 
 
-@app.post("/v1/text-to-speech/{voice_id}/stream", dependencies=[Depends(require_key)])
-async def eleven_stream(voice_id: str, req: ElevenRequest, output_format: str | None = None):
-    return await _eleven(voice_id, req, output_format, stream=True)
+@app.post("/v1/text-to-speech/{voice_id}/stream")
+async def eleven_stream(voice_id: str, req: ElevenRequest, output_format: str | None = None, p: Principal = Depends(auth.principal)):
+    return await _eleven(p, voice_id, req, output_format, stream=True)
 
 
-@app.post("/v1/text-to-speech/{voice_id}", dependencies=[Depends(require_key)])
-async def eleven_full(voice_id: str, req: ElevenRequest, output_format: str | None = None):
-    return await _eleven(voice_id, req, output_format, stream=False)
+@app.post("/v1/text-to-speech/{voice_id}")
+async def eleven_full(voice_id: str, req: ElevenRequest, output_format: str | None = None, p: Principal = Depends(auth.principal)):
+    return await _eleven(p, voice_id, req, output_format, stream=False)
 
 
 # ----------------------------------------------------------------- voices
-@app.get("/v1/voices", dependencies=[Depends(require_key)])
-async def list_voices():
-    return {"voices": registry.list()}
+@app.get("/v1/voices")
+async def list_voices(p: Principal = Depends(auth.principal)):
+    voices = [v for v in registry.list() if _can_use_voice(p, v["voice_id"])]
+    return {"voices": voices}
 
 
-@app.post("/v1/voices", dependencies=[Depends(require_key)], status_code=201)
+@app.post("/v1/voices", status_code=201)
 async def add_voice(
     name: str = Form(...),
     file: UploadFile = File(...),
@@ -316,7 +339,14 @@ async def add_voice(
     language: str = Form("en"),
     exaggeration: float = Form(0.5),
     overwrite: bool = Form(False),
+    p: Principal = Depends(auth.principal),
 ):
+    if auth.store is not None and not p.is_admin:
+        owner = auth.store.voice_owner(name)
+        if owner is not None and owner != p.account_id:
+            raise HTTPException(409, f"voice name {name!r} is taken")
+        if p.max_voices and owner is None and len(auth.store.account_voices(p.account_id)) >= p.max_voices:
+            raise HTTPException(429, f"voice limit: {p.max_voices} on the {p.plan} plan")
     suffix = Path(file.filename or "clip.wav").suffix.lower() or ".wav"
     if suffix not in {".wav", ".flac", ".mp3", ".ogg", ".m4a"}:
         raise HTTPException(400, "upload wav, flac, mp3, ogg or m4a")
@@ -337,18 +367,143 @@ async def add_voice(
     except ValueError as e:
         tmp.unlink(missing_ok=True)
         raise HTTPException(400, str(e))
+    except AssertionError as e:  # chatterbox: "Audio prompt must be longer than 5 seconds!"
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(400, str(e) or "reference clip too short (need > 5 s)")
+    if auth.store is not None and not p.is_admin:
+        auth.store.claim_voice(voice.id, p.account_id)
     return voice.to_public()
 
 
-@app.delete("/v1/voices/{voice_id}", dependencies=[Depends(require_key)])
-async def delete_voice(voice_id: str):
+@app.delete("/v1/voices/{voice_id}")
+async def delete_voice(voice_id: str, p: Principal = Depends(auth.principal)):
+    if auth.store is not None and not p.is_admin and auth.store.voice_owner(voice_id) != p.account_id:
+        raise HTTPException(404, "no such voice")
     try:
         registry.delete(voice_id)
     except KeyError:
         raise HTTPException(404, "no such voice")
     except PermissionError as e:
         raise HTTPException(403, str(e))
+    if auth.store is not None:
+        auth.store.release_voice(voice_id)
     return {"deleted": voice_id}
+
+
+# --------------------------------------------------------- account (self)
+def _need_store():
+    if auth.store is None:
+        raise HTTPException(404, "gateway disabled (TTS_GATEWAY=0)")
+    return auth.store
+
+
+@app.get("/v1/me")
+async def me(p: Principal = Depends(auth.principal)):
+    if p.is_admin:
+        return {"account_id": p.account_id, "name": p.account_name, "plan": p.plan, "admin": True}
+    st = _need_store()
+    acc = st.get_account(p.account_id)
+    return {
+        "account_id": acc["id"], "name": acc["name"], "email": acc["email"], "plan": acc["plan"],
+        "limits": {"chars_per_month": acc["char_limit"], "concurrency": acc["max_concurrency"], "rpm": acc["rpm"], "voices": acc["max_voices"]},
+        "month_chars": st.month_chars(acc["id"]),
+        "admin": False,
+    }
+
+
+@app.get("/v1/usage")
+async def usage(days: int = 30, p: Principal = Depends(auth.principal)):
+    st = _need_store()
+    return st.usage_summary(None if p.is_admin else p.account_id, days=max(1, min(days, 365)))
+
+
+@app.get("/v1/usage/recent")
+async def usage_recent(limit: int = 50, p: Principal = Depends(auth.principal)):
+    st = _need_store()
+    return {"rows": st.recent(None if p.is_admin else p.account_id, limit=max(1, min(limit, 500)))}
+
+
+@app.get("/v1/keys")
+async def list_keys(p: Principal = Depends(auth.principal)):
+    st = _need_store()
+    if p.is_admin:
+        raise HTTPException(400, "admin: use /admin/accounts/{id}/keys")
+    return {"keys": st.list_keys(p.account_id)}
+
+
+class KeyCreate(BaseModel):
+    name: str = "default"
+
+
+@app.post("/v1/keys", status_code=201)
+async def create_key(body: KeyCreate, p: Principal = Depends(auth.principal)):
+    st = _need_store()
+    if p.is_admin:
+        raise HTTPException(400, "admin: use /admin/accounts/{id}/keys")
+    raw, rec = st.create_key(p.account_id, body.name)
+    return {**rec, "key": raw}
+
+
+@app.delete("/v1/keys/{key_id}")
+async def revoke_key(key_id: str, p: Principal = Depends(auth.principal)):
+    st = _need_store()
+    st.revoke_key(key_id, None if p.is_admin else p.account_id)
+    return {"revoked": key_id}
+
+
+# ---------------------------------------------------------------- admin
+class AccountCreate(BaseModel):
+    name: str
+    email: str | None = None
+    plan: str = "free"
+
+
+@app.get("/admin/accounts", dependencies=[Depends(auth.admin)])
+async def admin_accounts():
+    st = _need_store()
+    out = []
+    for a in st.list_accounts():
+        out.append({**a, "month_chars": st.month_chars(a["id"]), "keys": st.list_keys(a["id"]), "voices": sorted(st.account_voices(a["id"]))})
+    return {"accounts": out, "plans": PLANS}
+
+
+@app.post("/admin/accounts", status_code=201, dependencies=[Depends(auth.admin)])
+async def admin_create_account(body: AccountCreate):
+    st = _need_store()
+    try:
+        acc = st.create_account(body.name, body.email, body.plan)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001 - unique email
+        raise HTTPException(409, f"could not create account: {e}")
+    raw, rec = st.create_key(acc["id"], "default")
+    return {"account": acc, "key": {**rec, "key": raw}}
+
+
+class PlanSet(BaseModel):
+    plan: str
+
+
+@app.put("/admin/accounts/{account_id}/plan", dependencies=[Depends(auth.admin)])
+async def admin_set_plan(account_id: str, body: PlanSet):
+    st = _need_store()
+    if body.plan not in PLANS:
+        raise HTTPException(400, f"unknown plan; choose from {sorted(PLANS)}")
+    return st.set_plan(account_id, body.plan)
+
+
+@app.post("/admin/accounts/{account_id}/keys", status_code=201, dependencies=[Depends(auth.admin)])
+async def admin_create_key(account_id: str, body: KeyCreate):
+    st = _need_store()
+    st.get_account(account_id)
+    raw, rec = st.create_key(account_id, body.name)
+    return {**rec, "key": raw}
+
+
+@app.get("/admin/usage", dependencies=[Depends(auth.admin)])
+async def admin_usage(days: int = 30, account_id: str | None = None):
+    st = _need_store()
+    return st.usage_summary(account_id, days=max(1, min(days, 365)))
 
 
 # ------------------------------------------------------------------- misc

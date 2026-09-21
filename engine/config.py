@@ -23,7 +23,13 @@ class Settings(BaseSettings):
     # server
     host: str = "0.0.0.0"
     port: int = 8000
-    api_keys: str = ""  # comma-separated bearer tokens; empty = no auth
+    api_keys: str = ""  # comma-separated bearer tokens; empty = no auth (gateway=False only)
+
+    # gateway: accounts, hashed API keys, quotas, metering (SQLite)
+    gateway: bool = False
+    db_path: Path = Path("data/voiceagent.db")
+    admin_key: str = ""  # unlocks /admin/* and bypasses quotas
+    public_url: str = ""  # shown in the dashboard / docs, e.g. https://tts.example.com
 
     # streaming
     first_chunk_words: int = 10
