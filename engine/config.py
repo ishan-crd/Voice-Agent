@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     max_chunk_chars: int = 250
     lookahead: int = 2
 
+    # turbo token-level streaming
+    first_block_tokens: int = 12  # speech tokens (25/s) before the first vocoder pass
+    ref_seconds: int = 6  # S3Gen reference prompt length used per block (0 = full clip)
+    t3_fp16: bool = True
+    cuda_graph: bool = True
+
     @property
     def model_list(self) -> list[str]:
         return [m.strip() for m in self.models.split(",") if m.strip()]

@@ -12,7 +12,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Iterator, Literal
 
 import numpy as np
 import torch
@@ -137,6 +137,7 @@ class TTSEngine:
         self.device = settings.device
         self.models: dict[str, Any] = {}
         self.builtin_conds: dict[str, Any] = {}
+        self.streamers: dict[str, Any] = {}  # kind -> TurboStreamer
         self.sr = SAMPLE_RATE
 
     # ------------------------------------------------------------------ load
@@ -173,19 +174,49 @@ class TTSEngine:
             self.models[kind] = model
             if getattr(model, "conds", None) is not None:
                 self.builtin_conds[kind] = model.conds
+            if kind == "turbo":
+                from .streaming import StreamConfig, TurboStreamer
+
+                self.streamers[kind] = TurboStreamer(
+                    model,
+                    StreamConfig(
+                        first_block=settings.first_block_tokens,
+                        t3_dtype=torch.float16 if settings.t3_fp16 else torch.float32,
+                        cuda_graph=settings.cuda_graph,
+                    ),
+                )
+                self._trim_ref(self.builtin_conds.get(kind))
+                # reference prompts are 5-6 s (250-300 mel frames); capture from there up
+                self.streamers[kind].warmup_graphs(prompt_frames=250)
             log.info("loaded %s in %.1fs", kind, time.perf_counter() - t0)
 
         self._warmup()
 
+    def _trim_ref(self, conds) -> None:
+        """Shorten the S3Gen reference prompt: the flow decoder re-encodes it on
+        every streamed block, so 10 s of prompt costs ~2x the vocoder time of 5 s."""
+        secs = settings.ref_seconds
+        if conds is None or secs <= 0:
+            return
+        g = conds.gen
+        n_tok, n_mel = 25 * secs, 50 * secs
+        if g["prompt_token"].shape[1] <= n_tok:
+            return
+        g["prompt_token"] = g["prompt_token"][:, :n_tok]
+        g["prompt_token_len"] = torch.tensor([n_tok], device=g["prompt_token"].device)
+        g["prompt_feat"] = g["prompt_feat"][:, :n_mel]
+        g["prompt_feat_len"] = torch.tensor([n_mel], device=g["prompt_feat"].device)
+
     def _warmup(self) -> None:
-        """The first CUDA call compiles kernels; do it before real traffic."""
+        """The first CUDA call compiles kernels (and captures the T3 graph); do it before real traffic."""
         for kind in self.models:
             conds = self.builtin_conds.get(kind)
             if conds is None:
                 continue
             try:
                 t0 = time.perf_counter()
-                self.synthesize(kind, "Warm up.", conds, "en", GenParams())
+                for _ in range(2):
+                    self.synthesize(kind, "Warm up, this is a longer sentence to settle the kernels.", conds, "en", GenParams())
                 log.info("warmed %s in %.2fs", kind, time.perf_counter() - t0)
             except Exception:  # noqa: BLE001
                 log.exception("warmup failed for %s", kind)
@@ -213,41 +244,51 @@ class TTSEngine:
         model.prepare_conditionals(wav_path, exaggeration=exaggeration)
         conds = model.conds
         model.conds = self.builtin_conds.get(kind, conds)
+        if kind == "turbo":
+            self._trim_ref(conds)
         return conds
 
     # -------------------------------------------------------------- generate
     @torch.inference_mode()
-    def synthesize(
+    def stream(
         self,
         kind: str,
         text: str,
         conds,
         language: str,
         params: GenParams,
-    ) -> np.ndarray:
-        """Returns float32 mono audio at 24 kHz."""
-        model = self.models[kind]
-        model.conds = conds
+    ) -> Iterator[np.ndarray]:
+        """Yield float32 mono 24 kHz audio blocks as they are produced.
+
+        Turbo streams at token level (many small blocks per sentence); the
+        multilingual model yields one block per call.
+        """
         if params.seed is not None:
             torch.manual_seed(params.seed)
             if torch.cuda.is_available():
                 torch.cuda.manual_seed_all(params.seed)
 
-        if kind == "turbo":
-            wav = model.generate(
-                text,
-                temperature=params.temperature,
-                repetition_penalty=params.repetition_penalty,
-                top_p=params.top_p,
-            )
-        else:
-            wav = model.generate(
-                text,
-                language_id=language.lower(),
-                exaggeration=params.exaggeration,
-                cfg_weight=params.cfg_weight,
-                temperature=params.temperature,
-                repetition_penalty=params.repetition_penalty,
-                top_p=params.top_p,
-            )
-        return wav.squeeze(0).detach().cpu().numpy().astype(np.float32)
+        streamer = self.streamers.get(kind)
+        if streamer is not None:
+            yield from streamer.stream(text, conds, params)
+            return
+
+        model = self.models[kind]
+        model.conds = conds
+        wav = model.generate(
+            text,
+            language_id=language.lower(),
+            exaggeration=params.exaggeration,
+            cfg_weight=params.cfg_weight,
+            temperature=params.temperature,
+            repetition_penalty=params.repetition_penalty,
+            top_p=params.top_p,
+        )
+        yield wav.squeeze(0).detach().cpu().numpy().astype(np.float32)
+
+    def synthesize(self, kind: str, text: str, conds, language: str, params: GenParams) -> np.ndarray:
+        """Non-streaming convenience: the whole utterance as one array."""
+        blocks = list(self.stream(kind, text, conds, language, params))
+        if not blocks:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(blocks)
