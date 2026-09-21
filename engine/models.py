@@ -195,7 +195,7 @@ class TTSEngine:
             elif kind == "multilingual":
                 from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-                model = ChatterboxMultilingualTTS.from_pretrained(device=self.device, t3_model="v3")
+                model = ChatterboxMultilingualTTS.from_pretrained(device=self.device)
             else:
                 raise ValueError(f"unknown model kind {kind!r} (use turbo | multilingual)")
 
@@ -210,17 +210,21 @@ class TTSEngine:
             self.models[kind] = model
             if getattr(model, "conds", None) is not None:
                 self.builtin_conds[kind] = model.conds
-            if kind == "turbo":
-                from .streaming import StreamConfig, TurboStreamer
+            if settings.streaming:
+                from .streaming import MultilingualStreamer, StreamConfig, TurboStreamer
 
-                self.streamers[kind] = TurboStreamer(
-                    model,
-                    StreamConfig(
-                        first_block=settings.first_block_tokens,
-                        t3_dtype=torch.float16 if settings.t3_fp16 else torch.float32,
-                        cuda_graph=settings.cuda_graph,
-                    ),
+                cls = TurboStreamer if kind == "turbo" else MultilingualStreamer
+                cfg = StreamConfig(
+                    first_block=settings.first_block_tokens,
+                    t3_dtype=torch.float16 if settings.t3_fp16 else torch.float32,
+                    cuda_graph=settings.cuda_graph,
                 )
+                if kind == "multilingual":
+                    # the 10-step CFG vocoder costs ~250 ms per block, so use fewer,
+                    # larger blocks: first audio ~450 ms with a comfortable playback margin
+                    cfg.first_block = max(settings.first_block_tokens, 20)
+                    cfg.block_growth = (20, 30, 50)
+                self.streamers[kind] = cls(model, cfg)
                 self._trim_ref(self.builtin_conds.get(kind))
                 # reference prompts are 5-6 s (250-300 mel frames); capture from there up
                 self.streamers[kind].warmup_graphs(prompt_frames=250)
@@ -280,7 +284,7 @@ class TTSEngine:
         model.prepare_conditionals(wav_path, exaggeration=exaggeration)
         conds = model.conds
         model.conds = self.builtin_conds.get(kind, conds)
-        if kind == "turbo":
+        if kind in self.streamers:
             self._trim_ref(conds)
         return conds
 
@@ -306,7 +310,7 @@ class TTSEngine:
 
         streamer = self.streamers.get(kind)
         if streamer is not None:
-            yield from streamer.stream(text, conds, params)
+            yield from streamer.stream(text, conds, params, language=language)
             return
 
         model = self.models[kind]
