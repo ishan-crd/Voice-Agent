@@ -12,6 +12,7 @@ export default function Voices() {
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
   const [lang, setLang] = useState("en");
+  const [mode, setMode] = useState<"quick" | "pro">("quick");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [toast, setToast] = useState<{ msg: string; tone?: "ok" | "err" } | null>(null);
@@ -36,6 +37,7 @@ export default function Voices() {
       fd.append("file", file, file.name || "clip.webm");
       fd.append("description", desc);
       fd.append("language", lang);
+      fd.append("mode", mode);
       const v = await api<Voice>("/v1/voices", { method: "POST", body: fd });
       setToast({ msg: `Voice "${v.voice_id}" is ready for ${v.ready_for.join(" + ")}` });
       setName("");
@@ -136,7 +138,17 @@ export default function Voices() {
               <option value="pt">Portuguese</option>
             </select>
           </Field>
-          <Field label="Reference clip">
+          <Field label="Clone mode">
+            <div className="grid grid-cols-2 gap-2">
+              {(["quick", "pro"] as const).map((m) => (
+                <button key={m} type="button" onClick={() => setMode(m)} className={`rounded-lg border px-3 py-2 text-left text-xs ${mode === m ? "border-accent bg-card" : "border-border text-fg-2"}`}>
+                  <div className="font-semibold">{m === "quick" ? "Quick" : "Pro"}</div>
+                  <div className="mt-0.5 text-[11px] leading-snug text-fg-3">{m === "quick" ? "One 6–15 s clip. Instant." : "1–10 min recording. Averages your identity across it and picks the cleanest stretch as the prompt."}</div>
+                </button>
+              ))}
+            </div>
+          </Field>
+          <Field label={mode === "pro" ? "Long recording" : "Reference clip"} hint={mode === "pro" ? "wav / mp3 / m4a, up to 200 MB" : "6–15 s"}>
             <div className="flex flex-col gap-2">
               <input type="file" accept="audio/*" className="text-sm" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
               <div className="flex items-center gap-2 text-xs text-fg-3">
@@ -159,8 +171,13 @@ export default function Voices() {
             </div>
           </Field>
           <button className="btn btn-primary w-full justify-center" disabled={busy || !file || !name.trim()} onClick={upload}>
-            {busy ? "Preparing voice…" : "Clone voice"}
+            {busy ? (mode === "pro" ? "Analysing recording…" : "Preparing voice…") : "Clone voice"}
           </button>
+          {mode === "pro" && (
+            <p className="rounded-lg border border-dashed p-2 text-[11px] leading-relaxed text-fg-3">
+              Read naturally for a few minutes in the mood you want — a story, an email, a support call. Vary your sentences; avoid music, other speakers and long silences. The model still conditions on ~10 s of audio, so the gain is a steadier, more typical identity rather than a different engine.
+            </p>
+          )}
           <p className="text-[11px] leading-relaxed text-fg-3">By uploading you confirm you own this voice or have the speaker&apos;s permission. Generated audio carries an inaudible watermark.</p>
         </div>
 
@@ -175,6 +192,7 @@ export default function Voices() {
                 <div className="flex items-center gap-2">
                   <span className="mono font-medium">{v.voice_id}</span>
                   {v.builtin && <span className="pill">built-in</span>}
+                  {!v.builtin && v.mode === "pro" && <span className="pill border-accent/50 text-accent">pro</span>}
                   <span className="pill uppercase">{v.language}</span>
                 </div>
                 <div className="truncate text-xs text-fg-2">{v.description || (v.builtin ? "Chatterbox reference voice" : "—")}</div>

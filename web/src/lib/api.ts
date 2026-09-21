@@ -83,6 +83,7 @@ export type Voice = {
   language: string;
   exaggeration: number;
   builtin: boolean;
+  mode?: string;
   ready_for: string[];
   created_at: number;
 };
@@ -121,6 +122,7 @@ export type SpeechParams = {
   exaggeration?: number;
   temperature?: number;
   cfg_weight?: number;
+  seed?: number;
   model?: string;
 };
 

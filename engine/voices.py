@@ -40,6 +40,7 @@ class Voice:
     language: str = "en"
     exaggeration: float = 0.5
     builtin: bool = False
+    mode: str = "quick"  # quick: first ~10 s of the clip | pro: best window + averaged identity
     conds: dict[str, Any] = field(default_factory=dict)  # model kind -> Conditionals
     created_at: float = 0.0
 
@@ -51,6 +52,7 @@ class Voice:
             "language": self.language,
             "exaggeration": self.exaggeration,
             "builtin": self.builtin,
+            "mode": self.mode,
             "ready_for": sorted(self.conds),
             "created_at": int(self.created_at),
         }
@@ -89,6 +91,7 @@ class VoiceRegistry:
                 description=m.get("description", ""),
                 language=m.get("language", "en"),
                 exaggeration=float(m.get("exaggeration", 0.5)),
+                mode=m.get("mode", "quick"),
                 created_at=p.stat().st_mtime,
             )
 
@@ -114,7 +117,7 @@ class VoiceRegistry:
 
     def _write_meta(self) -> None:
         data = {
-            v.id: {"description": v.description, "language": v.language, "exaggeration": v.exaggeration}
+            v.id: {"description": v.description, "language": v.language, "exaggeration": v.exaggeration, "mode": v.mode}
             for v in self.voices.values()
             if not v.builtin
         }
@@ -123,7 +126,7 @@ class VoiceRegistry:
     # ----------------------------------------------------------- conditionals
     def _fingerprint(self, v: Voice) -> str:
         st = v.path.stat()
-        raw = f"{v.path.name}:{st.st_size}:{int(st.st_mtime)}:{v.exaggeration}"
+        raw = f"{v.path.name}:{st.st_size}:{int(st.st_mtime)}:{v.exaggeration}:{v.mode}"
         return hashlib.sha1(raw.encode()).hexdigest()[:12]
 
     def _compute(self, v: Voice, kind: str):
@@ -142,7 +145,12 @@ class VoiceRegistry:
                 log.warning("voice %s/%s: cache unreadable, recomputing", v.id, kind)
 
         t0 = time.perf_counter()
-        conds = self.engine.prepare_conditionals(kind, str(v.path), exaggeration=v.exaggeration)
+        if v.mode == "pro":
+            from .cloning import prepare_pro
+
+            conds = prepare_pro(self.engine, kind, v.path, exaggeration=v.exaggeration)
+        else:
+            conds = self.engine.prepare_conditionals(kind, str(v.path), exaggeration=v.exaggeration)
         try:
             conds.save(cache)
         except Exception:  # noqa: BLE001
@@ -183,6 +191,7 @@ class VoiceRegistry:
         language: str = "en",
         exaggeration: float = 0.5,
         overwrite: bool = False,
+        mode: str = "quick",
     ) -> Voice:
         vid = _safe_id(voice_id)
         if vid in self.voices and not (overwrite and not self.voices[vid].builtin):
@@ -195,6 +204,7 @@ class VoiceRegistry:
             description=description,
             language=language,
             exaggeration=exaggeration,
+            mode="pro" if mode == "pro" else "quick",
             created_at=time.time(),
         )
         self.voices[vid] = v

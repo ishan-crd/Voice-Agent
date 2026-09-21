@@ -348,6 +348,7 @@ async def add_voice(
     language: str = Form("en"),
     exaggeration: float = Form(0.5),
     overwrite: bool = Form(False),
+    mode: str = Form("quick"),  # quick | pro (long recording: best window + averaged identity)
     p: Principal = Depends(auth.principal),
 ):
     if auth.store is not None and not p.is_admin:
@@ -358,8 +359,8 @@ async def add_voice(
             raise HTTPException(429, f"voice limit: {p.max_voices} on the {p.plan} plan")
     suffix = Path(file.filename or "clip.wav").suffix.lower() or ".bin"
     data = await file.read()
-    if len(data) > 25 * 1024 * 1024:
-        raise HTTPException(413, "clip too large (25 MB max)")
+    if len(data) > 200 * 1024 * 1024:
+        raise HTTPException(413, "recording too large (200 MB max)")
     fd, raw_name = tempfile.mkstemp(suffix=suffix, dir=registry.cache_dir)
     os.close(fd)  # Windows locks the file while the descriptor is open
     raw = Path(raw_name)
@@ -376,7 +377,7 @@ async def add_voice(
             raw.unlink(missing_ok=True)
     try:
         voice = await registry.add(
-            name, tmp, description=description, language=language, exaggeration=exaggeration, overwrite=overwrite
+            name, tmp, description=description, language=language, exaggeration=exaggeration, overwrite=overwrite, mode=mode
         )
     except FileExistsError:
         tmp.unlink(missing_ok=True)

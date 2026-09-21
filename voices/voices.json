@@ -1,1 +1,12 @@
-{}
+{
+  "ishantry": {
+    "description": "",
+    "language": "en",
+    "exaggeration": 0.5
+  },
+  "ishan_hindi": {
+    "description": "trying hindi",
+    "language": "hi",
+    "exaggeration": 0.5
+  }
+}

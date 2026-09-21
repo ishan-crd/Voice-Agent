@@ -25,6 +25,9 @@ export default function Playground() {
   const [text, setText] = useState(SAMPLES.en);
   const [speed, setSpeed] = useState(1);
   const [exag, setExag] = useState(0.5);
+  const [temp, setTemp] = useState(0.8);
+  const [cfg, setCfg] = useState(0.5);
+  const [seed, setSeed] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [ttfb, setTtfb] = useState<number | null>(null);
   const [total, setTotal] = useState<number | null>(null);
@@ -90,7 +93,16 @@ export default function Playground() {
     draw();
     try {
       const res = await speak(
-        { input: text, voice, language: lang === "auto" ? undefined : lang, speed, exaggeration: exag },
+        {
+          input: text,
+          voice,
+          language: lang === "auto" ? undefined : lang,
+          speed,
+          exaggeration: exag,
+          temperature: temp,
+          cfg_weight: cfg,
+          seed: seed.trim() ? Number(seed) : undefined,
+        },
         (chunk, t) => {
           player.current?.push(chunk);
           if (t !== null) setTtfb((v) => v ?? t);
@@ -193,11 +205,20 @@ export default function Playground() {
           <Field label={`Speed · ${speed.toFixed(2)}×`}>
             <input type="range" min={0.7} max={1.4} step={0.05} value={speed} onChange={(e) => setSpeed(Number(e.target.value))} className="w-full accent-[var(--accent)]" />
           </Field>
-          <Field label={`Expressiveness · ${exag.toFixed(2)}`} hint="multilingual model only">
-            <input type="range" min={0.2} max={1.0} step={0.05} value={exag} onChange={(e) => setExag(Number(e.target.value))} className="w-full accent-[var(--accent)]" />
+          <Field label={`Variation · ${temp.toFixed(2)}`} hint="lower = steadier, higher = livelier">
+            <input type="range" min={0.3} max={1.2} step={0.05} value={temp} onChange={(e) => setTemp(Number(e.target.value))} className="w-full accent-[var(--accent)]" />
           </Field>
-          <div className="rounded-lg border border-dashed p-3 text-xs text-fg-3">
-            English routes to <b>Turbo</b> (~150 ms first audio). Other languages route to <b>Multilingual</b> (~450 ms). Both stream token by token.
+          <Field label={`Emotion · ${exag.toFixed(2)}`} hint="Hindi & other languages">
+            <input type="range" min={0.2} max={1.2} step={0.05} value={exag} onChange={(e) => setExag(Number(e.target.value))} className="w-full accent-[var(--accent)]" />
+          </Field>
+          <Field label={`Guidance · ${cfg.toFixed(2)}`} hint="Hindi & other languages">
+            <input type="range" min={0.1} max={0.9} step={0.05} value={cfg} onChange={(e) => setCfg(Number(e.target.value))} className="w-full accent-[var(--accent)]" />
+          </Field>
+          <Field label="Seed" hint="same seed = same take">
+            <input className="input mono" placeholder="random" value={seed} onChange={(e) => setSeed(e.target.value.replace(/[^0-9]/g, ""))} />
+          </Field>
+          <div className="rounded-lg border border-dashed p-3 text-xs leading-relaxed text-fg-3">
+            English → <b>Turbo</b> (~150 ms): speed, variation, seed apply. Other languages → <b>Multilingual</b> (~450 ms): all sliders apply. Emotion 0.5 is neutral; guidance 0.5 is the default — lower it if a voice sounds strained.
           </div>
         </div>
       </div>
